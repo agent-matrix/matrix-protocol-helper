@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"   # e.g. v0.1.0
+      - "v*.*.*"  # e.g. v0.1.0
   workflow_dispatch: {}
 
 permissions:
@@ -28,11 +28,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (npm cache)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          cache: 'npm' # Using npm cache
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # If triggered by a tag, use it; otherwise let the action infer from tauri.conf.json
+          packageManager: npm # <-- This is the fix
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Matrix Protocol Helper {0}', github.ref_name) || 'Matrix Protocol Helper v__VERSION__' }}
           releaseBody: "See the assets below for platform-specific installers and checksums."
