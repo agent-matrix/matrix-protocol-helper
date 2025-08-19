@@ -1,3 +1,7 @@
+# .github/workflows/release.yml
+# This workflow creates a GitHub release and builds the application for macOS,
+# Windows, and Linux when a new version tag (e.g., v1.0.0) is pushed.
+
 name: Release
 
 on:
@@ -16,7 +20,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "" # set --target if you need separate arm/x64 mac builds
+            args: ""
           - platform: ubuntu-22.04
             args: ""
           - platform: windows-latest
@@ -25,27 +29,19 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js with npm caching
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      # FIX: Replaced pnpm caching with npm caching
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          cache: "npm" # Use the built-in caching for npm
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Linux deps (Ubuntu only)
+      - name: Install Linux dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
@@ -53,39 +49,42 @@ jobs:
             libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
             libappindicator3-dev librsvg2-dev patchelf build-essential
 
-      # FIX: Replaced 'pnpm install' with 'npm ci' for clean, reproducible installs
-      - name: Install frontend deps
-        run: npm ci
+      - name: Install frontend dependencies
+        run: npm ci # Use 'ci' for clean, reproducible installs from package-lock.json
 
-      # Build, create release (if needed), and upload bundles.
       - name: Build app and upload to Release
         id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__ # uses version from tauri.conf.json
-          releaseName: "Matrix Protocol Helper v__VERSION__"
+          tagName: ${{ github.ref_name }}
+          releaseName: "Matrix Protocol Helper ${{ github.ref_name }}"
           releaseBody: "See the assets below for platform-specific installers and checksums."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
-      # Generate SHA256SUMS.txt for the artifacts produced on this runner
       - name: Generate checksums
+        if: steps.tauri.outputs.artifactPaths
         shell: bash
         run: |
           set -euo pipefail
           # The tauri-action outputs a JSON string of artifact paths.
           # We'll parse it and generate checksums for each file.
           echo '${{ steps.tauri.outputs.artifactPaths }}' | \
-          jq -r '.[] | select(. | endswith(".AppImage") or endswith(".deb") or endswith(".rpm") or endswith(".dmg") or endswith(".msi"))' | \
-          xargs -I % sh -c 'sha256sum "%" >> SHA256SUMS.txt'
+          jq -r '.[]' | \
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              sha256sum "$file" >> SHA256SUMS.txt
+            fi
+          done
 
       - name: Upload checksums to Release
+        if: steps.tauri.outputs.appVersion && hashFiles('SHA256SUMS.txt')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.tauri.outputs.appVersion }}
+          tag_name: ${{ github.ref_name }}
           files: SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
