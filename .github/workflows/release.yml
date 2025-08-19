@@ -1,13 +1,15 @@
+# .github/workflows/release.yml
+
 name: Release
 
 on:
   push:
     tags:
-      - "v*.*.*"  # e.g. v0.1.0
+      - "v*.*.*" # e.g. v0.1.0
   workflow_dispatch: {}
 
 permissions:
-  contents: write  # create/update releases
+  contents: write # Required to create/update GitHub Releases
 
 jobs:
   build-and-release:
@@ -28,12 +30,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js with npm cache
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm  # cache npm based on package-lock.json
-      # GitHub recommends this pattern for npm caching/install. :contentReference[oaicite:2]{index=2}
+          cache: 'npm' # Use the built-in caching for npm
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -41,66 +42,52 @@ jobs:
       - name: Install Linux dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.0-dev \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            build-essential
-          # Try 4.1 if available (Tauri v2) – harmless if not found
-          sudo apt-get install -y libwebkit2gtk-4.1-dev || true
-        # Matches Tauri’s Linux requirements. :contentReference[oaicite:3]{index=3}
+            librsvg2-dev
 
-      - name: Install JS dependencies (npm)
-        shell: bash
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+      - name: Install npm dependencies
+        run: npm ci # 'ci' is faster and safer for CI environments
 
-      - name: Build app and upload to Release
+      - name: Build app and create Release
         id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Optional, but explicit; otherwise the action autodetects.
-          tauriScript: npm run tauri
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Matrix Protocol Helper {0}', github.ref_name) || 'Matrix Protocol Helper v__VERSION__' }}
+          # The tagName is set to the version from tauri.conf.json
+          tagName: v__VERSION__
+          releaseName: "Matrix Protocol Helper v__VERSION__"
           releaseBody: "See the assets below for platform-specific installers and checksums."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-        # See action docs for inputs/usage. :contentReference[oaicite:4]{index=4}
 
-      - name: Generate checksums
-        if: ${{ steps.tauri.outputs.artifactPaths != '' }}
+      - name: Generate and upload checksums
+        if: steps.tauri.outputs.artifactPaths != ''
         shell: bash
         run: |
           set -euo pipefail
-          ART_LIST='${{ steps.tauri.outputs.artifactPaths }}'
-          node -e "const v=(process.env.ART_LIST||'').trim(); let arr; try{arr=JSON.parse(v);}catch{arr=v.split(/\s+/);} for(const p of arr){ if(p) console.log(p); }" > artifacts.txt
-          rm -f SHA256SUMS.txt
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum \"$f\" >> SHA256SUMS.txt
-            else
-              shasum -a 256 \"$f\" >> SHA256SUMS.txt
-            fi
-          done < artifacts.txt
-
-      - name: Upload checksums to Release
-        if: ${{ steps.tauri.outputs.appVersion != '' && hashFiles('SHA256SUMS.txt') != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.tauri.outputs.appVersion }}
-          files: SHA256SUMS.txt
+          # Create a checksums file for all artifacts produced on this runner
+          cd src-tauri/target/release/bundle
+          
+          # Use shasum for macOS/Linux and sha256sum for Windows (via Git Bash)
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ./**/*.* > SHA256SUMS.txt
+          else
+            shasum -a 256 ./**/*.* > SHA256SUMS.txt
+          fi
+          
+          # Upload the checksums file to the release
+          gh release upload \
+            v${{ steps.tauri.outputs.appVersion }} \
+            SHA256SUMS.txt \
+            --clobber # Overwrite if it already exists from another job
         env:
+          # The GitHub CLI is pre-installed on runners and authenticated via GITHUB_TOKEN
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Usage per action docs. :contentReference[oaicite:5]{index=5}
