@@ -1,54 +1,38 @@
-# .github/workflows/release.yml
-# This workflow creates a GitHub release and builds the application for macOS,
-# Windows, and Linux when a new version tag (e.g., v1.0.0) is pushed.
-
-name: Create Release
+name: Release
 
 on:
   push:
     tags:
-      - 'v*' # Trigger the workflow on version tags
+      - "v*.*.*" # e.g. v0.1.0
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # required to create/update releases
 
 jobs:
-  # This job creates the initial GitHub Release.
-  # The build jobs will then upload their artifacts to this release.
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      release_id: ${{ steps.create_release.outputs.id }}
-    steps:
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: "Release ${{ github.ref_name }}"
-          body: "See the assets below for platform-specific installers."
-          draft: false
-          prerelease: false
-
-  # This job builds the application for all target platforms.
-  build-tauri:
-    needs: create-release # Wait for the release to be created first
+  build-and-release:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-20.04, windows-latest]
+        include:
+          - platform: macos-latest
+            args: "" # set --target if you need separate arm/x64 mac builds
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
 
     runs-on: ${{ matrix.platform }}
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      # Note: Assuming you are using pnpm as per your example.
-      # If you use npm, you can replace the pnpm steps with `run: npm install`.
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -57,8 +41,7 @@ jobs:
 
       - name: Get pnpm store directory
         shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
 
       - name: Cache pnpm dependencies
         uses: actions/cache@v4
@@ -68,28 +51,79 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
-      - name: Install Rust stable
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies (Linux)
-        if: matrix.platform == 'ubuntu-20.04'
+      - name: Install Linux deps (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev \
-            build-essential \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf build-essential
+          # webkitgtk 4.0 for Tauri v1; 4.1 for Tauri v2
 
-      - name: Install frontend dependencies
+      - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      # This is the core step that builds and uploads the release assets.
-      # The `tauri-action` automatically finds the correct artifacts for each
-      # platform and attaches them to the release created in the previous job.
-      - name: Build Application and Upload to Release
+      # Build, create release (if needed), and upload bundles.
+      - name: Build app and upload to Release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # (Optional) Set signing secrets here for macOS/Windows if you have them.
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # Let the action create/find the release for this tag and upload artifacts.
+          tagName: v__VERSION__ # uses version from tauri.conf.json
+          releaseName: "Matrix Protocol Helper v__VERSION__"
+          releaseBody: "See the assets below for platform-specific installers and checksums."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+          # assetNamePattern: "MatrixProtocolHelper-__VERSION__-{{target}}" # optional renaming
+
+      # Generate SHA256SUMS.txt for the artifacts produced on this runner
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Artifacts reported by tauri-action:"
+          echo '${{ steps.tauri.outputs.artifactPaths }}'
+          # artifactPaths may be a JSON array or a space-separated list; handle both:
+          ART_LIST=$(python - <<'PY'
+          import os, json
+          v = os.environ.get("ARTS","").strip()
+          try:
+            arr = json.loads(v)
+            print("\n".join(arr))
+          except Exception:
+            print(v)
+          PY
+          )
+          echo "$ART_LIST" | sed '/^$/d' > artifacts.txt
+          rm -f SHA256SUMS.txt
+          while IFS= read -r f; do
+            if [ -f "$f" ]; then
+              if command -v sha256sum >/dev/null 2>&1; then
+                sha256sum "$f" >> SHA256SUMS.txt
+              else
+                shasum -a 256 "$f" >> SHA256SUMS.txt
+              fi
+            fi
+          done < artifacts.txt
+        env:
+          ARTS: ${{ steps.tauri.outputs.artifactPaths }}
+
+      - name: Upload checksums to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.tauri.outputs.appVersion }}
+          files: SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
