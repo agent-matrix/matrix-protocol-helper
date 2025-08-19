@@ -1,0 +1,18 @@
+# Node / Tauri
+node_modules/
+dist/
+.DS_Store
+*.log
+*.lock
+
+# Rust
+src-tauri/target/
+**/*.rs.bk
+
+# OS / Editor
+.idea/
+.vscode/
+Thumbs.db
+
+* copy.*
+* copy *.*

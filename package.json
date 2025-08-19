@@ -1,0 +1,20 @@
+{
+  "name": "matrix-protocol-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OS protocol handler for matrix:// deep links that safely executes matrix-cli commands.",
+  "author": "Matrix Contributors",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.0.0",
+    "typescript": "^5.4.0"
+  }
+}
