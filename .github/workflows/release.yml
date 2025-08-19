@@ -32,7 +32,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm' # Using npm cache
+          cache: npm  # cache npm based on package-lock.json
+      # GitHub recommends this pattern for npm caching/install. :contentReference[oaicite:2]{index=2}
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -48,8 +49,9 @@ jobs:
             librsvg2-dev \
             patchelf \
             build-essential
-          # Try 4.1 if available (harmless if not found)
+          # Try 4.1 if available (Tauri v2) – harmless if not found
           sudo apt-get install -y libwebkit2gtk-4.1-dev || true
+        # Matches Tauri’s Linux requirements. :contentReference[oaicite:3]{index=3}
 
       - name: Install JS dependencies (npm)
         shell: bash
@@ -66,13 +68,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          packageManager: npm # <-- This is the fix
+          # Optional, but explicit; otherwise the action autodetects.
+          tauriScript: npm run tauri
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Matrix Protocol Helper {0}', github.ref_name) || 'Matrix Protocol Helper v__VERSION__' }}
           releaseBody: "See the assets below for platform-specific installers and checksums."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+        # See action docs for inputs/usage. :contentReference[oaicite:4]{index=4}
 
       - name: Generate checksums
         if: ${{ steps.tauri.outputs.artifactPaths != '' }}
@@ -80,7 +84,6 @@ jobs:
         run: |
           set -euo pipefail
           ART_LIST='${{ steps.tauri.outputs.artifactPaths }}'
-          # Normalize artifact paths (JSON array or space-separated) to one-per-line using Node (no heredocs)
           node -e "const v=(process.env.ART_LIST||'').trim(); let arr; try{arr=JSON.parse(v);}catch{arr=v.split(/\s+/);} for(const p of arr){ if(p) console.log(p); }" > artifacts.txt
           rm -f SHA256SUMS.txt
           while IFS= read -r f; do
@@ -100,3 +103,4 @@ jobs:
           files: SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Usage per action docs. :contentReference[oaicite:5]{index=5}
