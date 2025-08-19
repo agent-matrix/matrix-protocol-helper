@@ -19,22 +19,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - uses: pnpm/action-setup@v4
-        with: { version: 9, run_install: false }
-      - run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-      - uses: actions/cache@v4
+      
+      # Use npm for caching, based on package-lock.json
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-pnpm-store-
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
       - uses: dtolnay/rust-toolchain@stable
+      
       - if: matrix.platform == 'ubuntu-22.04'
+        name: Install Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
             libappindicator3-dev librsvg2-dev patchelf build-essential
-      - run: pnpm install --frozen-lockfile
+      
+      # Use npm ci for clean, reproducible installs
+      - name: Install dependencies
+        run: npm ci
+      
       - name: Build (no release upload)
         uses: tauri-apps/tauri-action@v0
         with:
@@ -43,6 +51,7 @@ jobs:
           includeRelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Upload artifacts to this run
         uses: actions/upload-artifact@v4
         with:

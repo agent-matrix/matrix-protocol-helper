@@ -33,23 +33,14 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-          run_install: false
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Cache pnpm dependencies
+      # FIX: Replaced pnpm caching with npm caching
+      - name: Cache npm dependencies
         uses: actions/cache@v4
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+            ${{ runner.os }}-npm-
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -61,10 +52,10 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
             libappindicator3-dev librsvg2-dev patchelf build-essential
-          # webkitgtk 4.0 for Tauri v1; 4.1 for Tauri v2
 
+      # FIX: Replaced 'pnpm install' with 'npm ci' for clean, reproducible installs
       - name: Install frontend deps
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       # Build, create release (if needed), and upload bundles.
       - name: Build app and upload to Release
@@ -72,53 +63,24 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # (Optional) Set signing secrets here for macOS/Windows if you have them.
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          # Let the action create/find the release for this tag and upload artifacts.
           tagName: v__VERSION__ # uses version from tauri.conf.json
           releaseName: "Matrix Protocol Helper v__VERSION__"
           releaseBody: "See the assets below for platform-specific installers and checksums."
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-          # assetNamePattern: "MatrixProtocolHelper-__VERSION__-{{target}}" # optional renaming
 
       # Generate SHA256SUMS.txt for the artifacts produced on this runner
       - name: Generate checksums
         shell: bash
         run: |
           set -euo pipefail
-          echo "Artifacts reported by tauri-action:"
-          echo '${{ steps.tauri.outputs.artifactPaths }}'
-          # artifactPaths may be a JSON array or a space-separated list; handle both:
-          ART_LIST=$(python - <<'PY'
-          import os, json
-          v = os.environ.get("ARTS","").strip()
-          try:
-            arr = json.loads(v)
-            print("\n".join(arr))
-          except Exception:
-            print(v)
-          PY
-          )
-          echo "$ART_LIST" | sed '/^$/d' > artifacts.txt
-          rm -f SHA256SUMS.txt
-          while IFS= read -r f; do
-            if [ -f "$f" ]; then
-              if command -v sha256sum >/dev/null 2>&1; then
-                sha256sum "$f" >> SHA256SUMS.txt
-              else
-                shasum -a 256 "$f" >> SHA256SUMS.txt
-              fi
-            fi
-          done < artifacts.txt
-        env:
-          ARTS: ${{ steps.tauri.outputs.artifactPaths }}
+          # The tauri-action outputs a JSON string of artifact paths.
+          # We'll parse it and generate checksums for each file.
+          echo '${{ steps.tauri.outputs.artifactPaths }}' | \
+          jq -r '.[] | select(. | endswith(".AppImage") or endswith(".deb") or endswith(".rpm") or endswith(".dmg") or endswith(".msi"))' | \
+          xargs -I % sh -c 'sha256sum "%" >> SHA256SUMS.txt'
 
       - name: Upload checksums to Release
         uses: softprops/action-gh-release@v2
