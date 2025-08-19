@@ -1,0 +1,52 @@
+# .github/workflows/ci-build.yml
+name: CI Build
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9, run_install: false }
+      - run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-store-
+      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf build-essential
+      - run: pnpm install --frozen-lockfile
+      - name: Build (no release upload)
+        uses: tauri-apps/tauri-action@v0
+        with:
+          # No tagName/releaseId here; this just builds locally on the runner.
+          includeDebug: false
+          includeRelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifacts to this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-bundles-${{ runner.os }}
+          path: |
+            src-tauri/target/release/bundle/**
+          retention-days: 7
