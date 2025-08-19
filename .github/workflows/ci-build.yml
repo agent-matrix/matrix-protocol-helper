@@ -1,5 +1,5 @@
-# .github/workflows/ci-build.yml
 name: CI Build
+
 on:
   push:
     branches: [ main ]
@@ -14,45 +14,48 @@ jobs:
       fail-fast: false
       matrix:
         platform: [macos-latest, ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      
-      # Use npm for caching, based on package-lock.json
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
 
-      - uses: dtolnay/rust-toolchain@stable
-      
-      - if: matrix.platform == 'ubuntu-22.04'
-        name: Install Linux dependencies
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (npm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev \
-            libappindicator3-dev librsvg2-dev patchelf build-essential
-      
-      # Use npm ci for clean, reproducible installs
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Build (no release upload)
-        uses: tauri-apps/tauri-action@v0
-        with:
-          # No tagName/releaseId here; this just builds locally on the runner.
-          includeDebug: false
-          includeRelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Upload artifacts to this run
+            libwebkit2gtk-4.0-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential
+          sudo apt-get install -y libwebkit2gtk-4.1-dev || true
+
+      - name: Install JS dependencies (npm)
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build (local only, no release upload)
+        run: npm run build
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: tauri-bundles-${{ runner.os }}
