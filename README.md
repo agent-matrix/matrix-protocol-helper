@@ -2,7 +2,7 @@
 
 *A tiny, secure desktop utility that enables one-click installations from your browser to the Matrix CLI.*
 
-
+[![Build Status](https://github.com/agent-matrix/matrix-protocol-helper/actions/workflows/ci-build.yml/badge.svg)](https://github.com/agent-matrix/matrix-protocol-helper/actions/workflows/ci-build.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Latest Release](https://img.shields.io/github/v/release/agent-matrix/matrix-protocol-helper)](https://github.com/agent-matrix/matrix-protocol-helper/releases/latest)
 
