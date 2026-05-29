@@ -48,23 +48,51 @@ pub async fn test_hub(url: String) -> Result<u32, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Build the best-available CLI installer command (pipx preferred, then pip).
+/// Find an available Python interpreter (`python3`/`python`/`py`).
+fn find_python() -> Option<&'static str> {
+    ["python3", "python", "py"].into_iter().find(|b| which(b).is_ok())
+}
+
+/// Whether `<py> -m <module> --version` succeeds (module importable).
+fn has_module(py: &str, module: &str) -> bool {
+    Command::new(py)
+        .args(["-m", module, "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Build the best-available CLI installer command.
+///
+/// Order is chosen for robustness — especially on Windows, where a plain
+/// `pip install matrix-cli` into the system Python fails trying to replace
+/// `dotenv.exe` (WinError 2):
+///   1. `python -m pipx install …` — isolated, and works even when the freshly
+///      installed `pipx` isn't on PATH yet.
+///   2. bare `pipx install …` (pipx on PATH).
+///   3. `python -m pip install --user …` — user site, avoids protected system
+///      `Scripts`.
 fn cli_installer() -> Option<Command> {
+    let py = find_python();
+
+    if let Some(p) = py {
+        if has_module(p, "pipx") {
+            let mut c = Command::new(p);
+            c.args(["-m", "pipx", "install", "matrix-cli"]);
+            return Some(c);
+        }
+    }
     if which("pipx").is_ok() {
         let mut c = Command::new("pipx");
         c.args(["install", "matrix-cli"]);
-        Some(c)
-    } else if which("python3").is_ok() {
-        let mut c = Command::new("python3");
-        c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
-        Some(c)
-    } else if which("python").is_ok() {
-        let mut c = Command::new("python");
-        c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
-        Some(c)
-    } else {
-        None
+        return Some(c);
     }
+    if let Some(p) = py {
+        let mut c = Command::new(p);
+        c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
+        return Some(c);
+    }
+    None
 }
 
 /// Install the Matrix CLI; streams output, resolves true on success.
@@ -73,7 +101,13 @@ pub async fn install_cli(on_line: Channel<String>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || match cli_installer() {
         Some(cmd) => {
             let code = cli::stream(cmd, &on_line).map_err(|e| e.to_string())?;
-            Ok(code == 0)
+            // pipx exits non-zero when the package is *already installed*, so
+            // treat "matrix is present afterward" as success regardless of code.
+            let ok = code == 0 || cli::cli_exists();
+            if ok && code != 0 {
+                let _ = on_line.send("matrix-cli is already installed.".into());
+            }
+            Ok(ok)
         }
         None => {
             let _ = on_line.send("No pipx or Python found. Install Python 3.11+ first.".into());

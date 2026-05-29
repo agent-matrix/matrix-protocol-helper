@@ -206,8 +206,13 @@ pipx install matrix-cli
 >
 > ```bash
 > python -m pip install --user pipx
-> pipx ensurepath
+> python -m pipx ensurepath
+> # use the module form so it works in the same terminal (PATH updates only apply to new ones):
+> python -m pipx install matrix-cli
 > ```
+>
+> On Windows, **don’t** `pip install matrix-cli` into the system Python — it can fail
+> with `dotenv.exe.deleteme` / `WinError 2`. See **Troubleshooting** below.
 
 **Example install command:**
 
@@ -227,12 +232,55 @@ matrix install mcp_server:hello-sse-server@0.1.0 --alias hello
 
 **“Matrix CLI not found”**
 
-* The Helper will offer guidance to install it.
+* The client will offer to **set it up for you** (Home → *Install Matrix CLI*, or the first-run wizard) — it runs the install with a visible log, no copy-paste.
   Manual install:
 
   ```bash
   pipx install matrix-cli
   ```
+
+**Windows: `pip` install fails with `dotenv.exe.deleteme` / `WinError 2`**
+
+Symptom (installing into the system Python at `C:\Python311`):
+
+```text
+WARNING: Failed to write executable - trying to use .deleteme logic
+ERROR: Could not install packages due to an OSError: [WinError 2] The system cannot
+find the file specified: 'C:\Python311\Scripts\dotenv.exe' ->
+'C:\Python311\Scripts\dotenv.exe.deleteme'
+```
+
+**Why:** a plain `pip install` is upgrading the `python-dotenv` dependency, but it
+can't replace `dotenv.exe` in the **protected system `Scripts` folder** (not elevated
+/ locked by antivirus). Half-removed `~`-prefixed folders from the aborted attempt
+(e.g. `~otenv`, `~ython_dotenv-*.dist-info`) then keep tripping every retry.
+
+**Fix — install with `pipx` (isolated, never touches system `Scripts`):**
+
+```powershell
+# 1) Remove the corrupted leftovers from the aborted install
+Remove-Item "C:\Python311\Lib\site-packages\~*" -Recurse -Force
+
+# 2) Install pipx into your user account
+python -m pip install --user pipx
+python -m pipx ensurepath
+
+# 3) Install matrix-cli. Use the MODULE form (python -m pipx) — pipx was just added
+#    to PATH but THIS terminal hasn't picked that up yet, so the bare `pipx` command
+#    won't be found until you open a new terminal.
+python -m pipx install matrix-cli
+
+# 4) Open a NEW terminal, then verify:
+matrix --version
+```
+
+> The key gotcha: right after `ensurepath`, the bare `pipx ...` command fails in the
+> **same** window (`'pipx' is not recognized`). Either use `python -m pipx ...` (works
+> immediately) or open a fresh terminal first. `matrix.exe` is installed to
+> `C:\Users\<you>\.local\bin`, which `ensurepath` adds to PATH.
+
+Prefer not to use pipx? A virtual environment or `python -m pip install --user matrix-cli`
+also avoids the protected system `Scripts` folder.
 
 **Corporate/school computer**
 
