@@ -28,10 +28,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js with npm cache
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm' # Use the built-in caching for npm
@@ -42,14 +42,18 @@ jobs:
       - name: Install Linux dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
             pkg-config \
             libssl-dev \
-            libwebkit2gtk-4.1-dev \
+            libwebkit2gtk-4.0-dev \
             libappindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            patchelf
+          # Tauri v2 prefers webkit2gtk-4.1; install it when available.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev || true
 
       - name: Install npm dependencies
         run: npm ci # 'ci' is faster and safer for CI environments
@@ -73,19 +77,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Create a checksums file for all artifacts produced on this runner
+          # Create a checksums file for all artifacts produced on this runner.
           cd src-tauri/target/release/bundle
-          
-          # Use shasum for macOS/Linux and sha256sum for Windows (via Git Bash)
+
+          # Pick a portable hashing command: sha256sum on Linux/Windows (Git Bash),
+          # shasum on macOS (where sha256sum is not available by default).
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum ./**/*.* > SHA256SUMS.txt
+            hash_cmd="sha256sum"
           else
-            shasum -a 256 ./**/*.* > SHA256SUMS.txt
+            hash_cmd="shasum -a 256"
           fi
-          
-          # Upload the checksums file to the release
+
+          # Hash every regular file recursively. Using `find -type f` avoids
+          # passing directories (such as the macOS `*.app` bundle) to the hashing
+          # tool, which previously caused the step to fail. The previous glob
+          # `./**/*.*` also did not recurse without `shopt -s globstar`.
+          : > SHA256SUMS.txt
+          find . -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z \
+            | while IFS= read -r -d '' file; do
+                $hash_cmd "$file" >> SHA256SUMS.txt
+              done
+
+          if [ ! -s SHA256SUMS.txt ]; then
+            echo "No artifacts found to checksum; skipping upload." >&2
+            exit 0
+          fi
+
+          # Upload the checksums file to the release.
           gh release upload \
-            v${{ steps.tauri.outputs.appVersion }} \
+            "v${{ steps.tauri.outputs.appVersion }}" \
             SHA256SUMS.txt \
             --clobber # Overwrite if it already exists from another job
         env:
