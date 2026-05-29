@@ -1,8 +1,8 @@
 [package]
 name = "matrix-protocol-helper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "OS protocol handler for matrix:// deep links that shells out to matrix-cli safely."
+description = "MatrixHub Client — desktop companion that manages the local Matrix environment and installs components from MatrixHub."
 license-file = "../../LICENSE"
 authors = ["Matrix Contributors"]
 readme = "../../README.md"
@@ -14,7 +14,6 @@ build = "src/build.rs"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2"
-tauri-plugin-opener = "2"
 
 url = "2.5"
 which = "6.0"
