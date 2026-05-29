@@ -230,10 +230,23 @@ export function SettingsView({ cfg, setCfg }: { cfg: Settings; setCfg: (fn: (c: 
 }
 
 /* ---------- Installs catalogue (within client) ---------- */
+// Real, installable registry entities (verified against the matrix-cli docs).
+// "Hello SSE Server" is the official install smoke-test.
 const AVAILABLE = [
-  { name: "Retell AI MCP Server", id: "mcp_server:retell-ai@0.2.2", initials: "RA", cmd: "matrix install retell-ai-mcp-server", ds: "Voice agents, phone calls, support flows." },
-  { name: "GitHub MCP Server", id: "mcp_server:github@2.0.3", initials: "GH", cmd: "matrix install github-mcp-server", ds: "Repos, PRs, issues, semantic search." },
-  { name: "OpenAI Image", id: "tool:openai-image@1.4.0", initials: "OA", cmd: "matrix install openai-image", ds: "Generate and edit visuals in workflows." },
+  {
+    name: "Hello SSE Server",
+    id: "mcp_server:hello-sse-server@0.1.0",
+    initials: "HS",
+    cmd: "matrix install mcp_server:hello-sse-server@0.1.0",
+    ds: "Minimal MCP server — the official one-click install smoke-test.",
+  },
+  {
+    name: "watsonx Agent",
+    id: "mcp_server:watsonx-agent@0.1.0",
+    initials: "WX",
+    cmd: "matrix install mcp_server:watsonx-agent@0.1.0",
+    ds: "IBM watsonx-powered chat agent, served over MCP.",
+  },
 ];
 
 export function InstallsView({

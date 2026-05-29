@@ -20,14 +20,6 @@ import type { EnvState, InstallReq, LogLine, LogTone, RecentInstall, Settings } 
 
 const APP_VERSION = "0.2.0";
 
-/** Demo request used by the "Simulate install" button. */
-const DEMO_REQ: InstallReq = {
-  id: "mcp_server:retell-ai@0.2.2",
-  name: "Retell AI MCP Server",
-  initials: "RA",
-  cmd: "matrix install retell-ai-mcp-server",
-};
-
 /** Build an InstallReq from a matrix:// deep-link payload. */
 function reqFromDeepLink(d: DeepLinkRequest): InstallReq {
   const base = d.entity.split("@")[0];
@@ -209,13 +201,6 @@ export default function App() {
             <div className="envline">
               <span className={"dot " + (env.hub ? "on" : "off")} /> Hub {env.hub ? "online" : "offline"}
             </div>
-            <button
-              className="btn btn-ghost"
-              style={{ width: "100%", height: 38, marginTop: 8, fontSize: 13 }}
-              onClick={() => setInstallReq(DEMO_REQ)}
-            >
-              <CI d={IC.bell} size={15} /> Simulate install
-            </button>
           </div>
         </aside>
 
