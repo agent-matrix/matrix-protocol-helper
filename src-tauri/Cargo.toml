@@ -10,10 +10,11 @@ readme = "../../README.md"
 build = "src/build.rs"
 
 [dependencies]
-tauri = { version = "^2.0.0-beta", features = [] }
-tauri-plugin-dialog = "^2.0.0-beta"
-tauri-plugin-deep-link = "^2.0.0-beta"
-tauri-plugin-opener = "^2.0.0-beta"
+# Pinned to the stable Tauri 2.x line (matches the JS @tauri-apps/* 2.x deps).
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
 
 url = "2.5"
 which = "6.0"
@@ -21,4 +22,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [build-dependencies]
-tauri-build = { version = "^2.0.0-beta", features = [] }
+tauri-build = { version = "2", features = [] }
