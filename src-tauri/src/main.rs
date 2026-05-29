@@ -5,14 +5,16 @@
 )]
 
 mod cli;
+mod commands;
 
-use cli::{cli_exists, run_matrix_install_stream};
-// Import traits to bring extension methods into scope.
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use url::Url;
 
+/// A validated `matrix://install` request, forwarded to the frontend so the
+/// MatrixHub Client can show its in-app install-approval modal.
+#[derive(Clone, Serialize)]
 struct InstallRequest {
     entity: String,
     alias: Option<String>,
@@ -72,108 +74,33 @@ fn parse_and_sanitize_link(link: &str) -> Result<InstallRequest, String> {
     Ok(InstallRequest { entity, alias, hub })
 }
 
-/// Shows the progress window and brings it to the front.
-fn show_progress_window(app: &AppHandle, title: &str) {
-    if let Some(win) = app.get_webview_window("progress") {
-        let _ = win.set_title(title);
+/// Brings the main client window to the foreground.
+fn focus_main(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
+        let _ = win.unminimize();
         let _ = win.set_focus();
     }
 }
 
-/// The main logic for handling a deep link request.
+/// Handles a `matrix://` deep link: validate, focus the client, and hand the
+/// request to the frontend, which renders the install-approval modal and runs
+/// the install through the `install_component` command.
 fn handle_link_request(app: &AppHandle, link: &str) {
-    // 1. Parse and sanitize the link.
-    let request = match parse_and_sanitize_link(link) {
-        Ok(req) => req,
+    match parse_and_sanitize_link(link) {
+        Ok(req) => {
+            focus_main(app);
+            // The frontend listens for this on startup.
+            let _ = app.emit("install-request", req);
+        }
         Err(msg) => {
             app.dialog()
                 .message(msg)
                 .title("Invalid Link")
                 .kind(MessageDialogKind::Error)
                 .show(|_| {});
-            return;
         }
-    };
-
-    // 2. Check if the Matrix CLI is installed.
-    if !cli_exists() {
-        app.dialog()
-            .message("Matrix CLI is not installed or not in your PATH.\n\nPlease install it with:\n\tpipx install matrix-cli\n\nThen click the install link again.")
-            .title("Matrix CLI Not Found")
-            .kind(MessageDialogKind::Warning)
-            .show(|_| {});
-        
-        // NOTE: `open_url` takes `Option<impl Into<String>>`; annotate `None` to avoid E0283.
-        let _ = app
-            .opener()
-            .open_url("https://pypi.org/project/matrix-cli/", None::<&str>);
-        return;
     }
-
-    // 3. Ask the user for confirmation (Rust-side dialog with Yes/No).
-    let app_handle = app.clone();
-    let alias_display = request
-        .alias
-        .clone()
-        .unwrap_or_else(|| "(auto — chosen by matrix-cli)".to_string());
-    let confirmation_message = format!(
-        "Do you want to install the following component?\n\nEntity:\n  {}\n\nAlias:\n  {}{}",
-        request.entity,
-        alias_display,
-        request
-            .hub
-            .as_ref()
-            .map(|h| format!("\n\nHub Override:\n  {}", h))
-            .unwrap_or_default()
-    );
-
-    // In Rust, use .message(...).buttons(...).show(...) for a Yes/No dialog.
-    app.dialog()
-        .message(confirmation_message)
-        .title("Confirm Installation")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom("Yes".into(), "No".into()))
-        .show(move |yes| {
-            if !yes {
-                return; // User clicked "No".
-            }
-
-            // 4. User confirmed. Show progress and run command.
-            show_progress_window(&app_handle, &format!("Installing '{}'...", alias_display));
-
-            std::thread::spawn(move || {
-                let alias_clone = alias_display.clone();
-                match run_matrix_install_stream(
-                    &app_handle,
-                    &request.entity,
-                    request.alias.as_deref(),
-                    request.hub.as_deref(),
-                ) {
-                    Ok(code) => {
-                        let _ = app_handle.emit(
-                            "install-complete",
-                            serde_json::json!({
-                                "ok": code == 0,
-                                "code": code,
-                                "alias": alias_clone,
-                            }),
-                        );
-                    }
-                    Err(e) => {
-                        let _ = app_handle.emit("log-line", format!("FATAL ERROR: {}", e));
-                        let _ = app_handle.emit(
-                            "install-complete",
-                            serde_json::json!({
-                                "ok": false,
-                                "code": -1,
-                                "alias": alias_clone,
-                            }),
-                        );
-                    }
-                }
-            });
-        });
 }
 
 #[cfg(test)]
@@ -194,10 +121,8 @@ mod tests {
     #[test]
     fn accepts_id_param_from_matrixhub_resultcard() {
         // matrixhub.io ResultCard / InstallCTA emit `id=` instead of `entity=`.
-        let r = parse_and_sanitize_link(
-            "matrix://install?id=tool.io-github-x.abc@1.0.1&alias=my-tool",
-        )
-        .unwrap();
+        let r = parse_and_sanitize_link("matrix://install?id=tool.io-github-x.abc@1.0.1&alias=my-tool")
+            .unwrap();
         assert_eq!(r.entity, "tool.io-github-x.abc@1.0.1");
         assert_eq!(r.alias.as_deref(), Some("my-tool"));
     }
@@ -242,10 +167,9 @@ mod tests {
 
     #[test]
     fn validates_hub_override() {
-        let ok = parse_and_sanitize_link(
-            "matrix://install?id=x&alias=a&hub=https://api.matrixhub.io",
-        )
-        .unwrap();
+        let ok =
+            parse_and_sanitize_link("matrix://install?id=x&alias=a&hub=https://api.matrixhub.io")
+                .unwrap();
         assert_eq!(ok.hub.as_deref(), Some("https://api.matrixhub.io"));
         assert!(parse_and_sanitize_link("matrix://install?id=x&alias=a&hub=ftp://evil").is_err());
     }
@@ -255,17 +179,32 @@ mod tests {
         let long = "a".repeat(257);
         assert!(parse_and_sanitize_link(&format!("matrix://install?id={long}&alias=a")).is_err());
     }
+
+    #[test]
+    fn split_args_handles_quotes() {
+        assert_eq!(cli::split_args("matrix search github"), vec!["matrix", "search", "github"]);
+        assert_eq!(
+            cli::split_args("search \"voice agent\" --json"),
+            vec!["search", "voice agent", "--json"]
+        );
+    }
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::cli_status,
+            commands::test_hub,
+            commands::install_cli,
+            commands::install_component,
+            commands::run_command,
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Keep the same event-listener structure you provided.
+            // matrix:// deep links arrive as new-instance events.
             app.listen("deep-link://new-instance", move |event| {
                 let link_str = event.payload();
                 if let Ok(link) = serde_json::from_str::<String>(link_str) {
@@ -275,7 +214,6 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

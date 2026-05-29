@@ -1,6 +1,6 @@
-# Matrix Protocol Helper
+# MatrixHub Client
 
-*A tiny, secure desktop utility that enables one-click installations from your browser to the Matrix CLI.*
+*The official cross-platform desktop companion for MatrixHub — it keeps your local Matrix environment ready and turns every `matrix://` link into a reviewed, one-click install.*
 
 [![Build Status](https://github.com/agent-matrix/matrix-protocol-helper/actions/workflows/ci-build.yml/badge.svg)](https://github.com/agent-matrix/matrix-protocol-helper/actions/workflows/ci-build.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
@@ -8,31 +8,31 @@
 
 ---
 
-The Matrix Protocol Helper is the essential bridge between your web browser and your local Matrix CLI. It registers the `matrix://` custom URL scheme, allowing you to install agents and servers from the Hub with a single click—while prioritizing security through mandatory user consent.
-
+MatrixHub Client is a small, secure desktop app (built with Tauri) that connects MatrixHub to your machine. It started life as a one-shot `matrix://` consent dialog and is now a persistent client with a tabbed workspace: **Home** (live environment status), **Terminal** (the real Matrix CLI), **Installs** (pending requests + installed components), **Logs** (audit trail), and **Settings**.
 
 ---
 
 ## What it does (in plain words)
 
-The Matrix Protocol Helper is the bridge between your web browser and your local Matrix CLI.
-
 * It registers the special link type **`matrix://`** on your computer.
-* When you click an **Install** button on the Matrix Hub website, the app:
+* When you click an **Install** button on MatrixHub, the client **comes to the front** and shows a first-class **Install Request** review screen — what it is, where it came from, and the exact command it will run. The request also **waits in the Installs tab (badged)** so it is never lost if you dismiss the modal.
+* On approval it runs the install through the real Matrix CLI — **no shell**, with live progress.
+* If the Matrix CLI isn't installed yet, the client can **set it up for you** (`pipx`/`pip`) from the first-run wizard or Home, with a visible log — no copy-paste.
 
-  1. asks for your **permission**,
-  2. runs the safe **install command** for you, and
-  3. shows clear **progress** and **results**.
-* If the Matrix CLI isn’t installed yet, it will **guide you** to install it.
+## Honest, live status (no fake checks)
 
----
+Home probes the machine for real rather than showing canned values:
+
+* **Matrix CLI** — detected via `matrix --version` (shows the real version).
+* **Python runtime** — detected via `python3 --version`.
+* **Protocol links** — `matrix://` handler registration.
+* **Hub connection** — a real connectivity probe to your configured hub, with round-trip latency.
 
 ## Safety at a glance
 
-* **You stay in control:** Every install requires your explicit confirmation in a native dialog.
-* **No risky commands:** The app prevents command-injection by sending parameters **directly** to the Matrix CLI (no shell).
-* **Minimal permissions:** It only handles `matrix://install` links and nothing else.
-* **Transparent:** Live logs show exactly what happened (success or failure).
+* **You stay in control:** every install is reviewed and explicitly approved in-app.
+* **No risky commands:** parameters are passed **directly** to the Matrix CLI (no shell); the `matrix://` alias/entity are strictly validated.
+* **Transparent:** the Logs tab is an append-only audit of everything the client runs.
 
 ---
 
