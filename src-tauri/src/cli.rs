@@ -10,25 +10,29 @@ pub fn cli_exists() -> bool {
     which("matrix").is_ok()
 }
 
-/// Spawns `matrix install <entity> --alias <alias>` safely without a shell.
+/// Spawns `matrix install <entity> [--alias <alias>] [--hub <hub>]` safely
+/// without a shell. `alias` is optional — when `None`, matrix-cli auto-suggests
+/// a friendly alias (matches matrixhub.io links that omit it).
 pub fn run_matrix_install_stream(
     app: &tauri::AppHandle,
     entity: &str,
-    alias: &str,
+    alias: Option<&str>,
     hub: Option<&str>,
 ) -> std::io::Result<i32> {
     let mut cmd = Command::new("matrix");
-    cmd.arg("install")
-        .arg(entity)
-        .arg("--alias")
-        .arg(alias)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
+    cmd.arg("install").arg(entity);
+    if let Some(a) = alias {
+        cmd.arg("--alias").arg(a);
+    }
+    // Pass the hub override both as the documented `--hub` flag and the
+    // MATRIX_HUB_BASE env var that matrix-cli honors, for maximum compatibility.
     if let Some(h) = hub {
+        cmd.arg("--hub").arg(h);
         cmd.env("MATRIX_HUB_BASE", h);
     }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
     let mut threads: Vec<JoinHandle<()>> = vec![];
