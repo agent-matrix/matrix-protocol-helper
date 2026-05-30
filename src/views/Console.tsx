@@ -32,7 +32,7 @@ const T_BOOT = [
 // `mcp test` are not real subcommands (they exit with code 2); groups use
 // `--help` so a chip never errors.
 const CHIPS = [
-  "matrix help",
+  "matrix --help",
   "matrix --version",
   "matrix search github",
   "matrix ps",
