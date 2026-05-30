@@ -46,6 +46,50 @@ export async function testHub(url: string): Promise<number> {
   return invoke<number>("test_hub", { url });
 }
 
+/* ---------- runtime diagnostics (verify the .venv backend is installed) ---------- */
+export interface RuntimeDiagnostics {
+  pythonOk: boolean;
+  pythonVersion: string | null;
+  venvPath: string | null;
+  venvPythonOk: boolean;
+  matrixInstalled: boolean;
+  matrixPath: string | null;
+  matrixVersion: string | null;
+  ready: boolean;
+}
+
+export async function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
+  if (!isTauri()) {
+    return {
+      pythonOk: false,
+      pythonVersion: null,
+      venvPath: null,
+      venvPythonOk: false,
+      matrixInstalled: false,
+      matrixPath: null,
+      matrixVersion: null,
+      ready: false,
+    };
+  }
+  return invoke<RuntimeDiagnostics>("runtime_diagnostics");
+}
+
+/* ---------- full diagnosis report (Debug button) ---------- */
+/** Generate a complete Markdown diagnosis bundle (build info + runtime + log
+ *  tail) for bug reports or to hand to a developer/AI to debug the app. */
+export async function generateDiagnosis(hubUrl?: string): Promise<string> {
+  if (!isTauri()) {
+    return [
+      "# MatrixHub Client — Diagnosis Report",
+      "",
+      "(browser preview — the native backend is not available, so this is a stub)",
+      "",
+      `- Hub: ${hubUrl ?? "n/a"}`,
+    ].join("\n");
+  }
+  return invoke<string>("generate_diagnosis", { hubUrl: hubUrl ?? null });
+}
+
 /* ---------- streaming helpers ---------- */
 type OnLine = (line: string) => void;
 
@@ -125,16 +169,65 @@ export async function runCommand(line: string, onLine: OnLine): Promise<number> 
   return invoke<number>("run_command", { line, onLine: channel(onLine) });
 }
 
+/* ---------- diagnostics bridge (frontend → client.log) ---------- */
+/** Record a line from the UI into the persistent diagnostics log so the
+ *  diagnosis report captures what the frontend actually observed. Fire-and-forget. */
+export function logFrontend(
+  level: "debug" | "info" | "warn" | "error",
+  message: string,
+): void {
+  if (!isTauri()) return;
+  void invoke("log_frontend", { level, message }).catch(() => {});
+}
+
 /* ---------- real terminal (PTY) ---------- */
+/** Decode a base64 string (PTY output transport) to raw bytes. */
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Active unlisten callbacks keyed by session id, cleaned up in ptyClose. */
+const _ptyUnlisteners = new Map<number, Array<UnlistenFn>>();
+
+/**
+ * Open a PTY session and stream output to `onData`.
+ *
+ * Transport: the Rust side emits Tauri events "pty-data-{id}" (base64 payload)
+ * and "pty-exit-{id}" (shell closed) via AppHandle::emit(), which is
+ * guaranteed thread-safe on all platforms. This replaces Channel<T>::send(),
+ * which proved unreliable on Windows WebView2 / Linux WebKitGTK when called
+ * from background threads (messages enqueued in Rust but JS onmessage never
+ * fired, leaving bytesSeen=0 in the frontend).
+ */
 export async function ptyOpen(
   onData: (bytes: Uint8Array) => void,
   cols: number,
   rows: number,
 ): Promise<number> {
   if (!isTauri()) return 0;
-  const ch = new Channel<number[]>();
-  ch.onmessage = (bytes) => onData(new Uint8Array(bytes));
-  return invoke<number>("pty_open", { onData: ch, cols, rows });
+  // Start the PTY; the Rust side will emit events once the shell produces output.
+  const id = await invoke<number>("pty_open", { cols, rows });
+  if (!id) return id;
+
+  // Subscribe to PTY output events for this session.
+  const unlistenData = await listen<{ data: string }>(`pty-data-${id}`, (e) => {
+    try {
+      onData(b64ToBytes(e.payload.data));
+    } catch (err) {
+      logFrontend("error", `pty decode failed (session ${id}): ${String(err)}`);
+    }
+  });
+
+  // Subscribe to shell-exit event so callers can react (optional).
+  const unlistenExit = await listen(`pty-exit-${id}`, () => {
+    logFrontend("info", `terminal: PTY session ${id} shell exited`);
+  });
+
+  _ptyUnlisteners.set(id, [unlistenData, unlistenExit]);
+  return id;
 }
 
 export async function ptyWrite(id: number, data: string): Promise<void> {
@@ -149,6 +242,12 @@ export async function ptyResize(id: number, cols: number, rows: number): Promise
 
 export async function ptyClose(id: number): Promise<void> {
   if (!isTauri() || !id) return;
+  // Tear down event listeners before closing the backend session.
+  const fns = _ptyUnlisteners.get(id);
+  if (fns) {
+    for (const fn_ of fns) fn_();
+    _ptyUnlisteners.delete(id);
+  }
   await invoke("pty_close", { id }).catch(() => {});
 }
 

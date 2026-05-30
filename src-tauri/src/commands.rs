@@ -43,6 +43,21 @@ pub async fn cli_status() -> CliStatus {
     })
 }
 
+/// Bridge a log line from the frontend into the persistent diagnostics log.
+/// This lets the UI record what it actually observes (PTY bytes received,
+/// terminal lifecycle, render errors) so the diagnosis report captures the
+/// *frontend's* view too — invaluable for debugging WebView-only issues that
+/// never reach Rust. `level` is one of debug|info|warn|error (default info).
+#[tauri::command]
+pub fn log_frontend(level: String, message: String) {
+    match level.as_str() {
+        "debug" => cli::log_debug(&format!("[ui] {message}")),
+        "warn" => cli::log_warn(&format!("[ui] {message}")),
+        "error" => cli::log_error(&format!("[ui] {message}")),
+        _ => cli::log_event(&format!("[ui] {message}")),
+    }
+}
+
 /// Measure hub connectivity, returning round-trip milliseconds.
 #[tauri::command]
 pub async fn test_hub(url: String) -> Result<u32, String> {
@@ -250,6 +265,281 @@ pub fn app_info(app: AppHandle) -> AppInfo {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
     }
+}
+
+/// One detected issue with a severity and an actionable fix. Surfaced at the
+/// top of the diagnosis so a human or AI reviewer sees the verdict first.
+struct Finding {
+    severity: &'static str, // "BLOCKER" | "WARN" | "INFO"
+    title: String,
+    detail: String,
+    fix: String,
+}
+
+/// Run all automated checks against the current runtime + PTY state and return
+/// the findings, ordered by severity. This is the "brain" of the diagnosis:
+/// every check knows what good looks like and what to do when it isn't.
+fn detect_findings(
+    diag: &cli::RuntimeDiagnostics,
+    pty: &crate::pty::PtyStats,
+    hub_ok: Option<bool>,
+) -> Vec<Finding> {
+    let mut f = Vec::new();
+
+    if !diag.python_ok {
+        f.push(Finding {
+            severity: "BLOCKER",
+            title: "No Python interpreter found".into(),
+            detail: "A real Python 3.11+ is required to build the managed runtime.".into(),
+            fix: "Install Python (Settings ▸ Install Python, or python.org) and relaunch so it joins PATH.".into(),
+        });
+    }
+    if diag.python_ok && !diag.venv_python_ok {
+        f.push(Finding {
+            severity: "WARN",
+            title: "Managed venv not created yet".into(),
+            detail: "Python is available but the app-managed .venv does not exist.".into(),
+            fix: "Click 'Install Matrix CLI' (or Reset Matrix CLI) to provision the runtime.".into(),
+        });
+    }
+    if diag.venv_python_ok && !diag.matrix_installed {
+        f.push(Finding {
+            severity: "BLOCKER",
+            title: "matrix-cli is not installed in the venv".into(),
+            detail: "The venv exists but its `matrix` executable is missing.".into(),
+            fix: "Run Reset Matrix CLI to reinstall, then re-run this diagnosis.".into(),
+        });
+    }
+    if hub_ok == Some(false) {
+        f.push(Finding {
+            severity: "WARN",
+            title: "MatrixHub is unreachable".into(),
+            detail: "Could not open a TCP connection to the configured hub.".into(),
+            fix: "Check the Hub URL in Settings and your network/proxy/VPN.".into(),
+        });
+    }
+    // Terminal-specific heuristics — these catch the exact class of bug seen on
+    // Windows (PTY opens but the visible terminal shows nothing).
+    if pty.opened >= 2 && pty.bytes_streamed == 0 {
+        f.push(Finding {
+            severity: "BLOCKER",
+            title: "Terminal opened but produced no output".into(),
+            detail: format!(
+                "{} PTY sessions were opened but 0 bytes were ever streamed back. The shell is not emitting a prompt.",
+                pty.opened
+            ),
+            fix: "Check the shell path in the log ('opening PTY shell'). On Windows ensure PowerShell exists; try Reset and relaunch.".into(),
+        });
+    }
+    if pty.opened >= 6 && pty.currently_open <= 1 {
+        f.push(Finding {
+            severity: "INFO",
+            title: "Many short-lived terminal sessions".into(),
+            detail: format!(
+                "{} PTYs opened, {} closed — typical of repeated view switches or a remount loop.",
+                pty.opened, pty.closed
+            ),
+            fix: "Harmless if the terminal works. If it flickers, report this section.".into(),
+        });
+    }
+
+    let rank = |s: &str| match s {
+        "BLOCKER" => 0,
+        "WARN" => 1,
+        _ => 2,
+    };
+    f.sort_by_key(|x| rank(x.severity));
+    f
+}
+
+/// Generate a complete, self-contained diagnosis report for debugging.
+///
+/// This is an industrial-strength report designed to make *future, unknown*
+/// errors debuggable without a live reproduction. It bundles:
+///   • an automated verdict with severity-ranked findings and concrete fixes;
+///   • build/platform info and a redacted environment snapshot;
+///   • a full snapshot of the managed Python `.venv` runtime;
+///   • live tool probes (`matrix --version`, `matrix --help`);
+///   • terminal/PTY health counters (opens, closes, bytes streamed);
+///   • hub connectivity;
+///   • the most recent ERROR/WARN lines, then the raw log tail.
+/// The Markdown is meant to be pasted into a bug report or handed to an AI
+/// assistant so it can fix the current application state.
+#[tauri::command]
+pub async fn generate_diagnosis(app: AppHandle, hub_url: Option<String>) -> Result<String, String> {
+    let pkg_name = app.package_info().name.clone();
+    let pkg_version = app.package_info().version.to_string();
+    let identifier = app.config().identifier.clone();
+    let log_path = cli::log_path().map(|p| p.display().to_string());
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let diag = cli::runtime_diagnostics();
+        let pty = crate::pty::stats();
+        cli::log_event("generate_diagnosis: building report");
+
+        // Hub probe.
+        let (hub_ok, hub_line) = match hub_url.as_deref() {
+            Some(url) if !url.is_empty() => match cli::ping_hub(url) {
+                Ok(ms) => (Some(true), format!("- Hub `{url}`: reachable ({ms} ms)")),
+                Err(e) => (Some(false), format!("- Hub `{url}`: UNREACHABLE ({e})")),
+            },
+            _ => (None, "- Hub: not tested".to_string()),
+        };
+
+        let findings = detect_findings(&diag, &pty, hub_ok);
+        let yn = |b: bool| if b { "yes" } else { "NO" };
+
+        // --- Verdict block (top of report) ---
+        let blockers = findings.iter().filter(|f| f.severity == "BLOCKER").count();
+        let warns = findings.iter().filter(|f| f.severity == "WARN").count();
+        let verdict = if blockers > 0 {
+            format!("❌ NOT READY — {blockers} blocker(s), {warns} warning(s)")
+        } else if warns > 0 {
+            format!("⚠️  READY WITH WARNINGS — {warns} warning(s)")
+        } else if diag.ready {
+            "✅ HEALTHY — all checks passed".to_string()
+        } else {
+            "⚠️  UNKNOWN — runtime not ready".to_string()
+        };
+
+        let mut findings_md = String::new();
+        if findings.is_empty() {
+            findings_md.push_str("_No issues detected by automated checks._\n");
+        } else {
+            for fnd in &findings {
+                findings_md.push_str(&format!(
+                    "- **[{}] {}**\n  - {}\n  - Fix: {}\n",
+                    fnd.severity, fnd.title, fnd.detail, fnd.fix
+                ));
+            }
+        }
+
+        // --- Live tool probes ---
+        let probe = |label: &str, args: &[&str]| -> String {
+            if !diag.ready {
+                return format!("- `matrix {}`: skipped (CLI not installed)", args.join(" "));
+            }
+            match cli::capture(&cli::matrix_program(), args, 1200) {
+                Ok((code, out)) => format!(
+                    "- `matrix {}` (exit {code}):\n```\n{}\n```",
+                    args.join(" "),
+                    if out.is_empty() { "(no output)".to_string() } else { out }
+                ),
+                Err(e) => format!("- `matrix {}`: could not run ({e})  [{label}]", args.join(" ")),
+            }
+        };
+        let probe_version = probe("version", &["--version"]);
+        // `--help` is a clean, always-valid probe that confirms the CLI fully
+        // loads its command tree (unlike `doctor`, which requires an ALIAS arg).
+        let probe_help = probe("help", &["--help"]);
+
+        // --- Environment snapshot ---
+        let mut env_md = String::new();
+        for (k, v) in cli::env_snapshot() {
+            env_md.push_str(&format!("- {k}: `{v}`\n"));
+        }
+        if env_md.is_empty() {
+            env_md.push_str("- (no relevant environment variables set)\n");
+        }
+
+        // --- Recent problems + raw tail ---
+        let problems = cli::recent_problems(40);
+        let problems_md = if problems.is_empty() {
+            "_No ERROR/WARN lines in the log._".to_string()
+        } else {
+            format!("```\n{}\n```", problems.join("\n"))
+        };
+        let tail = cli::log_tail(200);
+        let tail = if tail.is_empty() { "(log is empty or unavailable)".to_string() } else { tail };
+
+        let now = cli::now_utc();
+
+        let report = format!(
+            "# MatrixHub Client — Diagnosis Report\n\
+             \n\
+             > Generated: {now}\n\
+             > Paste this entire report into a bug report or hand it to an AI assistant to debug the app.\n\
+             \n\
+             ## Verdict\n\
+             **{verdict}**\n\
+             \n\
+             ## Findings (automated checks)\n\
+             {findings_md}\n\
+             ## Application\n\
+             - Product: {pkg_name}\n\
+             - Version: v{pkg_version}\n\
+             - Identifier: {identifier}\n\
+             - Tauri: {tauri}\n\
+             - OS / Arch: {os} / {arch}\n\
+             - Log file: {logp}\n\
+             \n\
+             ## Runtime readiness\n\
+             - **Ready to work: {ready}**\n\
+             - Python available: {py_ok} ({py_ver})\n\
+             - Managed venv path: {venv}\n\
+             - venv Python present: {venv_py}\n\
+             - matrix-cli installed: {mtx_ok}\n\
+             - matrix path: {mtx_path}\n\
+             - matrix version: {mtx_ver}\n\
+             \n\
+             ## Terminal / PTY health\n\
+             - Sessions opened (lifetime): {pty_open}\n\
+             - Sessions closed (lifetime): {pty_close}\n\
+             - Currently open: {pty_now}\n\
+             - Total bytes streamed from shells: {pty_bytes}\n\
+             \n\
+             ## Live tool probes\n\
+             {probe_version}\n\
+             {probe_help}\n\
+             \n\
+             ## Connectivity\n\
+             {hub_line}\n\
+             \n\
+             ## Environment\n\
+             {env_md}\n\
+             ## Recent problems (ERROR / WARN)\n\
+             {problems_md}\n\
+             \n\
+             ## Recent log (last 200 lines of client.log)\n\
+             ```\n{tail}\n```\n",
+            tauri = tauri::VERSION,
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            logp = log_path.as_deref().unwrap_or("(unset)"),
+            ready = yn(diag.ready),
+            py_ok = yn(diag.python_ok),
+            py_ver = diag.python_version.as_deref().unwrap_or("-"),
+            venv = diag.venv_path.as_deref().unwrap_or("(unset)"),
+            venv_py = yn(diag.venv_python_ok),
+            mtx_ok = yn(diag.matrix_installed),
+            mtx_path = diag.matrix_path.as_deref().unwrap_or("-"),
+            mtx_ver = diag.matrix_version.as_deref().unwrap_or("-"),
+            pty_open = pty.opened,
+            pty_close = pty.closed,
+            pty_now = pty.currently_open,
+            pty_bytes = pty.bytes_streamed,
+        );
+
+        // Persist the report next to the logs so it survives even if the
+        // clipboard copy fails, and log that we produced it.
+        if let Some(dir) = cli::log_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let file = dir.join(format!("diagnosis-{stamp}.md"));
+            if std::fs::write(&file, &report).is_ok() {
+                cli::log_event(&format!("generate_diagnosis: saved {}", file.display()));
+            }
+        }
+        cli::log_event(&format!(
+            "generate_diagnosis: done — {blockers} blocker(s), {warns} warning(s)"
+        ));
+
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Repair the Matrix CLI: delete the managed runtime and recreate it cleanly.

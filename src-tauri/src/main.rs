@@ -199,7 +199,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::cli_status,
             commands::test_hub,
+            commands::log_frontend,
             commands::runtime_diagnostics,
+            commands::generate_diagnosis,
             commands::install_cli,
             commands::install_component,
             commands::run_command,

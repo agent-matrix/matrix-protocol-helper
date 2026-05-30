@@ -11,6 +11,7 @@ import { UpdateModal, UpdateToast } from "./flows/UpdateModal";
 import {
   checkUpdate,
   exportLogs,
+  generateDiagnosis,
   getAppInfo,
   getCliStatus,
   getInstallId,
@@ -140,6 +141,37 @@ export default function App() {
       log("ok", `logs exported · ${path}`);
     } catch (e) {
       log("err", `export failed · ${String(e)}`);
+    }
+  }
+
+  // Generate a complete diagnosis report and make it easy to share with a
+  // developer or AI assistant: copy to clipboard, save a .md next to the logs,
+  // and echo it into the in-app Logs view.
+  async function onDebug() {
+    setBusy(true);
+    log("info", "generating diagnosis report …");
+    try {
+      const report = await generateDiagnosis(cfg.hubUrl);
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(report);
+        copied = true;
+      } catch {
+        /* clipboard may be unavailable; the report is still saved + shown */
+      }
+      // Mirror the report into the in-app log so it is visible immediately.
+      for (const line of report.split("\n")) log("dim", line);
+      log(
+        "ok",
+        copied
+          ? "✓ diagnosis copied to clipboard and saved next to client.log"
+          : "✓ diagnosis saved next to client.log (clipboard unavailable)",
+      );
+      setRoute("logs");
+    } catch (e) {
+      log("err", `diagnosis failed · ${String(e)}`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -352,6 +384,7 @@ export default function App() {
                 onResetCli,
                 onExportLogs,
                 onOpenDataDir,
+                onDebug,
                 busy,
               }}
             />

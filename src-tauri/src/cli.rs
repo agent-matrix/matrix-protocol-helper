@@ -48,6 +48,25 @@ pub fn set_log_path(path: PathBuf) {
     let _ = LOG_FILE.set(path);
 }
 
+/// Path to the persistent diagnostics log, if configured.
+pub fn log_path() -> Option<PathBuf> {
+    LOG_FILE.get().cloned()
+}
+
+/// Read the last `max_lines` lines of the persistent diagnostics log.
+/// Returns an empty string when the log is unset or unreadable.
+pub fn log_tail(max_lines: usize) -> String {
+    let Some(path) = LOG_FILE.get() else {
+        return String::new();
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
 /// Format a UNIX timestamp (seconds) as a human-readable UTC string
 /// `YYYY-MM-DDThh:mm:ssZ`. Avoids pulling in `chrono` for one line.
 fn fmt_utc(secs: u64) -> String {
@@ -69,6 +88,15 @@ fn fmt_utc(secs: u64) -> String {
     let year = if m <= 2 { y + 1 } else { y };
 
     format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// The current wall-clock time as an ISO-8601 UTC string. Used in report headers.
+pub fn now_utc() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    fmt_utc(secs)
 }
 
 /// Append a leveled, timestamped line to the persistent diagnostics log.
@@ -324,6 +352,90 @@ pub fn runtime_diagnostics() -> RuntimeDiagnostics {
     diag
 }
 
+/// Capture `<program> <args...>` and return (exit_code, combined stdout+stderr,
+/// truncated to `max_chars`). Used by the diagnosis report to probe tools like
+/// `matrix doctor` without streaming. Never panics; returns an Err string on
+/// spawn failure so the report can show "could not run".
+pub fn capture(program: &str, args: &[&str], max_chars: usize) -> Result<(i32, String), String> {
+    let mut cmd = command(program);
+    cmd.args(args);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&out.stdout));
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&err);
+    }
+    let text = text.trim().to_string();
+    let text = if text.chars().count() > max_chars {
+        let cut: String = text.chars().take(max_chars).collect();
+        format!("{cut}\n…(truncated)")
+    } else {
+        text
+    };
+    Ok((out.status.code().unwrap_or(-1), text))
+}
+
+/// Scan the persistent log and return the most recent lines tagged ERROR or
+/// WARN (the leveled logger emits fixed-width `ERROR`/`WARN ` tags). Returns at
+/// most `max` lines, newest last. Empty when nothing notable is logged.
+pub fn recent_problems(max: usize) -> Vec<String> {
+    let Some(path) = LOG_FILE.get() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut hits: Vec<String> = content
+        .lines()
+        .filter(|l| l.contains("] ERROR ") || l.contains("] WARN ") || l.contains("read error") || l.contains("write failed"))
+        .map(|l| l.to_string())
+        .collect();
+    let start = hits.len().saturating_sub(max);
+    hits.drain(0..start);
+    hits
+}
+
+/// A redacted snapshot of environment values relevant to launching tools.
+/// Home directories are kept (they are needed to interpret paths) but nothing
+/// secret is included.
+pub fn env_snapshot() -> Vec<(String, String)> {
+    let keys = [
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "SHELL",
+        "COMSPEC",
+        "SystemRoot",
+        "VIRTUAL_ENV",
+        "PYTHONHOME",
+    ];
+    let mut out = Vec::new();
+    for k in keys {
+        if let Ok(v) = std::env::var(k) {
+            if !v.is_empty() {
+                out.push((k.to_string(), v));
+            }
+        }
+    }
+    // PATH is long; record only how many entries and whether the venv is on it.
+    if let Ok(path) = std::env::var("PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let entries: Vec<&str> = path.split(sep).filter(|s| !s.is_empty()).collect();
+        let venv_on_path = venv_bin_dir()
+            .map(|b| {
+                let b = b.to_string_lossy().to_lowercase();
+                entries.iter().any(|e| e.to_lowercase() == b)
+            })
+            .unwrap_or(false);
+        out.push(("PATH entries".to_string(), entries.len().to_string()));
+        out.push(("venv on PATH".to_string(), venv_on_path.to_string()));
+    }
+    out
+}
+
 /// Delete the managed venv (for a clean repair).
 pub fn remove_runtime() -> std::io::Result<()> {
     if let Some(venv) = venv_dir() {
@@ -433,7 +545,7 @@ pub fn stream(mut cmd: Command, on_line: &Channel<String>) -> std::io::Result<i3
         let ch = on_line.clone();
         handles.push(thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                log_event(&format!("  out| {line}"));
+                log_debug(&format!("  out| {line}"));
                 let _ = ch.send(line);
             }
         }));
@@ -442,7 +554,7 @@ pub fn stream(mut cmd: Command, on_line: &Channel<String>) -> std::io::Result<i3
         let ch = on_line.clone();
         handles.push(thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log_event(&format!("  err| {line}"));
+                log_warn(&format!("  err| {line}"));
                 let _ = ch.send(line);
             }
         }));
@@ -511,6 +623,60 @@ pub fn split_args(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn now_utc_is_iso_8601_shaped() {
+        let s = now_utc();
+        // YYYY-MM-DDThh:mm:ssZ
+        assert_eq!(s.len(), 20, "got {s}");
+        assert!(s.ends_with('Z'));
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[10..11], "T");
+    }
+
+    #[test]
+    fn capture_runs_a_real_program() {
+        // Probe an interpreter that exists on every CI runner.
+        let prog = if cfg!(windows) { "cmd" } else { "echo" };
+        let args: &[&str] = if cfg!(windows) { &["/C", "echo", "hi"] } else { &["hi"] };
+        let (code, out) = capture(prog, args, 100).expect("echo should run");
+        assert_eq!(code, 0);
+        assert!(out.contains("hi"), "got {out:?}");
+    }
+
+    #[test]
+    fn capture_reports_missing_program() {
+        assert!(capture("definitely-not-a-real-binary-xyz", &[], 100).is_err());
+    }
+
+    #[test]
+    fn capture_truncates_long_output() {
+        // Ask for a tiny budget and confirm the truncation marker appears.
+        let prog = if cfg!(windows) { "cmd" } else { "printf" };
+        let args: &[&str] = if cfg!(windows) {
+            &["/C", "echo", "aaaaaaaaaaaaaaaaaaaa"]
+        } else {
+            &["aaaaaaaaaaaaaaaaaaaa"]
+        };
+        let (_code, out) = capture(prog, args, 5).expect("runs");
+        assert!(out.contains("truncated"), "got {out:?}");
+    }
+
+    #[test]
+    fn env_snapshot_records_path_metadata() {
+        // PATH is set in every test environment, so the snapshot must include
+        // the derived "PATH entries" and "venv on PATH" rows.
+        let snap = env_snapshot();
+        assert!(snap.iter().any(|(k, _)| k == "PATH entries"));
+        assert!(snap.iter().any(|(k, _)| k == "venv on PATH"));
+    }
+
+    #[test]
+    fn recent_problems_is_empty_without_log() {
+        // With no log path configured in this unit-test binary, problem scan is
+        // a clean empty vec rather than a panic.
+        assert!(recent_problems(10).is_empty());
+    }
 
     #[test]
     fn fmt_utc_matches_known_timestamps() {
