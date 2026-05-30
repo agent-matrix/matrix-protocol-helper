@@ -6,6 +6,7 @@
 
 mod cli;
 mod commands;
+mod pty;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager};
@@ -210,8 +211,23 @@ fn main() {
             commands::install_python,
             commands::open_url,
             commands::relaunch,
+            pty::pty_open,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_close,
         ])
         .setup(|app| {
+            // Persistent diagnostics log: <app_log_dir>/client.log
+            if let Ok(dir) = app.path().app_log_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                cli::set_log_path(dir.join("client.log"));
+                cli::log_event("=== MatrixHub Client started ===");
+            }
+            // App-managed Python runtime: <app_data_dir>/runtime/.venv
+            if let Ok(dir) = app.path().app_data_dir() {
+                cli::set_runtime_dir(dir.join("runtime"));
+            }
+
             let handle = app.handle().clone();
 
             // matrix:// deep links arrive as new-instance events.

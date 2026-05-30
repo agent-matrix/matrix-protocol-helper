@@ -121,18 +121,28 @@ above, alongside the signed installers.
 
 ---
 
-## 4. Self-contained / fragile-dependency mitigation
+## 4. Self-contained runtime (managed venv)
 
-The client depends on the Matrix CLI (Python/pipx). To keep enterprise users out
-of dependency trouble, the app provides:
+To avoid system-Python / PATH / Microsoft-Store-alias / pipx problems, the client
+provisions and owns an **isolated Python virtual environment**:
 
-- **First-run setup wizard** that installs the CLI with a visible log.
-- **Settings → Diagnostics → Reset Matrix CLI** (repair: uninstall + reinstall).
-- **Export logs** and **Open data folder** for support tickets.
+- Location: `<app_data_dir>/runtime/.venv` (per-user, survives upgrades).
+- `matrix-cli` is installed into it (`python -m venv` + `pip install matrix-cli`),
+  and the app invokes `matrix` by **absolute path** from that venv — never relying
+  on PATH. The real terminal also prepends the venv's `bin`/`Scripts` to PATH.
+- A real system Python is only needed once, to *create* the venv; if it's missing
+  the app installs it via winget/Homebrew (python.org fallback).
+
+Supportability:
+
+- **First-run setup wizard** provisions the runtime with a visible log.
+- **Settings → Diagnostics → Reset Matrix CLI** deletes and recreates the venv.
+- **Export logs** / **Open data folder**, plus a persistent `client.log` recording
+  every command + output + exit code.
 - A stable **Install ID** (Settings → About) to correlate support cases.
 
-A future hardening step is to ship `matrix-cli` as a **bundled sidecar binary** so
-no Python/pipx is required at all; see `bundle.externalBin` in the Tauri docs.
+For a *zero-Python* install, the next step is to ship `matrix-cli` as a **bundled
+sidecar binary** (PyInstaller) via `bundle.externalBin`.
 
 ---
 

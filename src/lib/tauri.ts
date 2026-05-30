@@ -79,7 +79,7 @@ export async function relaunchApp(): Promise<void> {
   await invoke("relaunch");
 }
 
-/** Install the Matrix CLI (pipx/pip). Streams output; resolves true on success. */
+/** Provision the managed runtime (.venv + matrix-cli). Streams output; resolves true on success. */
 export async function installCli(onLine: OnLine): Promise<boolean> {
   if (!isTauri()) {
     for (const l of [
@@ -123,6 +123,33 @@ export async function runCommand(line: string, onLine: OnLine): Promise<number> 
     return 0;
   }
   return invoke<number>("run_command", { line, onLine: channel(onLine) });
+}
+
+/* ---------- real terminal (PTY) ---------- */
+export async function ptyOpen(
+  onData: (bytes: Uint8Array) => void,
+  cols: number,
+  rows: number,
+): Promise<number> {
+  if (!isTauri()) return 0;
+  const ch = new Channel<number[]>();
+  ch.onmessage = (bytes) => onData(new Uint8Array(bytes));
+  return invoke<number>("pty_open", { onData: ch, cols, rows });
+}
+
+export async function ptyWrite(id: number, data: string): Promise<void> {
+  if (!isTauri() || !id) return;
+  await invoke("pty_write", { id, data });
+}
+
+export async function ptyResize(id: number, cols: number, rows: number): Promise<void> {
+  if (!isTauri() || !id) return;
+  await invoke("pty_resize", { id, cols, rows }).catch(() => {});
+}
+
+export async function ptyClose(id: number): Promise<void> {
+  if (!isTauri() || !id) return;
+  await invoke("pty_close", { id }).catch(() => {});
 }
 
 /* ---------- deep-link install requests ---------- */
