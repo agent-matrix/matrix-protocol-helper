@@ -168,7 +168,27 @@ const toggleRows: [keyof Settings, string, string][] = [
   ["autostart", "Launch at login", "Start MatrixHub Client in the background when you sign in."],
 ];
 
-export function SettingsView({ cfg, setCfg }: { cfg: Settings; setCfg: (fn: (c: Settings) => Settings) => void }) {
+export interface DiagProps {
+  appVersion: string;
+  identifier: string;
+  installId: string;
+  checkingUpdate: boolean;
+  busy: boolean;
+  onCheckUpdates: () => void;
+  onResetCli: () => void;
+  onExportLogs: () => void;
+  onOpenDataDir: () => void;
+}
+
+export function SettingsView({
+  cfg,
+  setCfg,
+  diag,
+}: {
+  cfg: Settings;
+  setCfg: (fn: (c: Settings) => Settings) => void;
+  diag: DiagProps;
+}) {
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     setCfg((c) => {
       const n = { ...c, [k]: v };
@@ -224,6 +244,50 @@ export function SettingsView({ cfg, setCfg }: { cfg: Settings; setCfg: (fn: (c: 
             </div>
           );
         })}
+      </div>
+
+      {/* ---- Diagnostics ---- */}
+      <p className="eyebrow" style={{ marginTop: 36 }}>Diagnostics</p>
+      <div className="card" style={{ marginTop: 12 }}>
+        {[
+          { ic: IC.refresh, nm: "Check for updates", ds: "Look for a newer signed release.", label: diag.checkingUpdate ? "Checking…" : "Check", onClick: diag.onCheckUpdates, disabled: diag.checkingUpdate },
+          { ic: IC.spark, nm: "Reset Matrix CLI", ds: "Repair: uninstall and reinstall the CLI cleanly.", label: "Reset", onClick: diag.onResetCli, disabled: diag.busy },
+          { ic: IC.logs, nm: "Export logs", ds: "Save a diagnostics log file for support.", label: "Export", onClick: diag.onExportLogs, disabled: false },
+          { ic: IC.box, nm: "Open data folder", ds: "Show this app's local data and logs.", label: "Open", onClick: diag.onOpenDataDir, disabled: false },
+        ].map((r) => (
+          <div className="statrow" key={r.nm}>
+            <span className="ic"><CI d={r.ic} size={16} /></span>
+            <div style={{ minWidth: 0 }}>
+              <div className="nm">{r.nm}</div>
+              <div className="ds">{r.ds}</div>
+            </div>
+            <span className="rt">
+              <button className="btn btn-ghost" style={{ height: 34, fontSize: 12.5, padding: "0 14px" }} onClick={r.onClick} disabled={r.disabled}>
+                {r.label}
+              </button>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* ---- About ---- */}
+      <p className="eyebrow" style={{ marginTop: 36 }}>About</p>
+      <div className="card" style={{ marginTop: 12, padding: "16px 16px" }}>
+        {[
+          ["Product", "MatrixHub Client"],
+          ["Version", `v${diag.appVersion}`],
+          ["Identifier", diag.identifier],
+          ["Install ID", diag.installId],
+        ].map(([k, v]) => (
+          <div key={k} style={{ display: "flex", gap: 12, padding: "7px 0", fontSize: 13 }}>
+            <span style={{ width: 110, flexShrink: 0, color: "var(--ink-3)" }}>{k}</span>
+            <span className="mono" style={{ color: "var(--ink-2)", wordBreak: "break-all" }}>{v}</span>
+          </div>
+        ))}
+        <a href="https://www.matrixhub.io/" target="_blank" rel="noreferrer"
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, marginTop: 10, fontSize: 13, color: "var(--acc-bright)" }}>
+          <CI d={IC.link} size={15} /> matrixhub.io
+        </a>
       </div>
     </div>
   );

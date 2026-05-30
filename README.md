@@ -34,6 +34,22 @@ Home probes the machine for real rather than showing canned values:
 * **No risky commands:** parameters are passed **directly** to the Matrix CLI (no shell); the `matrix://` alias/entity are strictly validated.
 * **Transparent:** the Logs tab is an append-only audit of everything the client runs.
 
+## Auto-update & enterprise
+
+* **Built-in auto-update.** On launch the client checks for a newer **signed**
+  release and shows a *"New version available"* notification → a changelog card →
+  one-click **Update now** with a live progress bar, then relaunches. Manual checks
+  live in **Settings → Diagnostics → Check for updates**.
+* **Diagnostics & supportability.** Settings → Diagnostics offers *Reset Matrix CLI*
+  (repair), *Export logs*, and *Open data folder*; the About panel shows the version
+  and a stable **Install ID** for support tickets.
+* **Windows installers.** Releases produce a branded **NSIS `.exe`** (consumers) and
+  an **MSI** with a fixed `upgradeCode` for clean upgrades and silent fleet
+  deployment (Intune / SCCM / GPO).
+
+> Packaging, code signing, silent-deploy commands, and the updater release process
+> are documented in **[ENTERPRISE.md](./ENTERPRISE.md)**.
+
 ---
 
 ## System requirements

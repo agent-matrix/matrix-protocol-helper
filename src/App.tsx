@@ -7,13 +7,21 @@ import { SidebarRain } from "./components/SidebarRain";
 import { HomeView, InstallsView, LogsView, SettingsView } from "./views/Views";
 import { ClientConsole } from "./views/Console";
 import { InstallFlow, SetupWizard } from "./flows/Flows";
+import { UpdateModal, UpdateToast } from "./flows/UpdateModal";
 import {
+  checkUpdate,
+  exportLogs,
+  getAppInfo,
   getCliStatus,
+  getInstallId,
   installCli,
   onInstallRequest,
+  openDataDir,
+  resetCli,
   testHub,
   windowControls,
   type DeepLinkRequest,
+  type UpdateInfo,
 } from "./lib/tauri";
 import { STORE, persist, now } from "./store";
 import type { EnvState, InstallReq, LogLine, LogTone, RecentInstall, Settings } from "./store";
@@ -53,6 +61,12 @@ export default function App() {
     { ts: now(), t: "info", m: "MatrixHub Client started" },
     { ts: now(), t: "dim", m: "loading local environment …" },
   ]);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [appVer, setAppVer] = useState(APP_VERSION);
+  const installId = useRef(getInstallId());
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
 
@@ -81,8 +95,64 @@ export default function App() {
     log(hubOk ? "ok" : "warn", hubOk ? `✓ hub online · ${ms}ms` : "hub offline");
   }, [log]);
 
+  const checkForUpdates = useCallback(
+    async (silent: boolean) => {
+      setCheckingUpdate(true);
+      try {
+        const info = await checkUpdate();
+        if (info.available) {
+          setUpdate(info);
+          setUpdateDismissed(false);
+          if (!silent) setUpdateOpen(true);
+          log("info", `update available · v${info.version}`);
+        } else if (!silent) {
+          log("ok", `you're on the latest version (v${info.currentVersion})`);
+        }
+      } catch (e) {
+        if (!silent) log("warn", `update check unavailable · ${String(e)}`);
+      } finally {
+        setCheckingUpdate(false);
+      }
+    },
+    [log],
+  );
+
+  async function onResetCli() {
+    setBusy(true);
+    log("info", "repairing matrix-cli (reset) …");
+    try {
+      const ok = await resetCli((line) => log("dim", line));
+      log(ok ? "ok" : "err", ok ? "✓ matrix-cli reset complete" : "reset failed");
+    } finally {
+      await refresh();
+      setBusy(false);
+    }
+  }
+
+  async function onExportLogs() {
+    const text = logs.map((l) => `${l.ts}\t${l.t.toUpperCase()}\t${l.m}`).join("\n");
+    try {
+      const path = await exportLogs(text);
+      log("ok", `logs exported · ${path}`);
+    } catch (e) {
+      log("err", `export failed · ${String(e)}`);
+    }
+  }
+
+  async function onOpenDataDir() {
+    try {
+      const path = await openDataDir();
+      log("dim", `opened data folder · ${path}`);
+    } catch (e) {
+      log("warn", `could not open data folder · ${String(e)}`);
+    }
+  }
+
   useEffect(() => {
     refresh();
+    getAppInfo().then((i) => setAppVer(i.version)).catch(() => {});
+    // Background update check shortly after launch (premium app behaviour).
+    const t = setTimeout(() => checkForUpdates(true), 1500);
     const un = onInstallRequest((d) => {
       log("info", `matrix:// install request · ${d.entity}`);
       const req = reqFromDeepLink(d);
@@ -93,9 +163,10 @@ export default function App() {
       setSideOpen(false);
     });
     return () => {
+      clearTimeout(t);
       un.then((f) => f());
     };
-  }, [refresh, log]);
+  }, [refresh, log, checkForUpdates]);
 
   const nav = [
     { id: "home", label: "Home", ic: IC.home, badge: null as number | null },
@@ -165,7 +236,7 @@ export default function App() {
           <CI d={IC.cli} size={15} style={{ color: "var(--acc)" }} /> MatrixHub Client
         </div>
         <div className="spacer" data-tauri-drag-region />
-        <span className="ver">v{APP_VERSION}</span>
+        <span className="ver">v{appVer}</span>
       </div>
 
       <div className="body">
@@ -244,9 +315,30 @@ export default function App() {
             />
           )}
           {route === "logs" && <LogsView lines={logs} />}
-          {route === "settings" && <SettingsView cfg={cfg} setCfg={setCfg} />}
+          {route === "settings" && (
+            <SettingsView
+              cfg={cfg}
+              setCfg={setCfg}
+              diag={{
+                appVersion: appVer,
+                identifier: "io.matrixhub.client",
+                installId: installId.current,
+                checkingUpdate,
+                onCheckUpdates: () => checkForUpdates(false),
+                onResetCli,
+                onExportLogs,
+                onOpenDataDir,
+                busy,
+              }}
+            />
+          )}
         </main>
       </div>
+
+      {update?.available && !updateOpen && !updateDismissed && (
+        <UpdateToast info={update} onOpen={() => setUpdateOpen(true)} onDismiss={() => setUpdateDismissed(true)} />
+      )}
+      {update?.available && updateOpen && <UpdateModal info={update} onClose={() => setUpdateOpen(false)} />}
 
       {installReq && (
         <InstallFlow

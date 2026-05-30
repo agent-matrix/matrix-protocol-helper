@@ -28,7 +28,17 @@ const T_BOOT = [
   "Ask Matrix in plain English, or run a command.",
 ];
 
-const CHIPS = ["matrix help", "matrix search github", "matrix list", "matrix mcp test", "matrix --version"];
+// Valid matrix-cli commands (see matrix_cli/__main__.py). `list` and
+// `mcp test` are not real subcommands (they exit with code 2); groups use
+// `--help` so a chip never errors.
+const CHIPS = [
+  "matrix help",
+  "matrix --version",
+  "matrix search github",
+  "matrix ps",
+  "matrix connection --help",
+  "matrix mcp probe --help",
+];
 
 function TermLine({ text, tone }: { text: string; tone: Tone }) {
   return (

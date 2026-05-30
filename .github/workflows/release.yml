@@ -63,13 +63,21 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing keys (optional). When these repo secrets are set, the
+          # build can emit signed updater artifacts; empty otherwise (no-op).
+          # See ENTERPRISE.md → Auto-update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # The tagName is set to the version from tauri.conf.json
           tagName: v__VERSION__
-          releaseName: "Matrix Protocol Helper v__VERSION__"
+          releaseName: "MatrixHub Client v__VERSION__"
           releaseBody: "See the assets below for platform-specific installers and checksums."
           releaseDraft: false
           prerelease: false
+          # To emit signed auto-update artifacts at release time, append:
+          #   --config {"bundle":{"createUpdaterArtifacts":true}}
+          # (requires the TAURI_SIGNING_PRIVATE_KEY secrets above).
           args: ${{ matrix.args }}
 
       - name: Generate and upload checksums

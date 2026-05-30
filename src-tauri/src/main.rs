@@ -194,12 +194,19 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::cli_status,
             commands::test_hub,
             commands::install_cli,
             commands::install_component,
             commands::run_command,
+            commands::check_update,
+            commands::install_update,
+            commands::app_info,
+            commands::reset_cli,
+            commands::open_data_dir,
+            commands::export_logs,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

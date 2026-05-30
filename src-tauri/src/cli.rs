@@ -1,14 +1,42 @@
 //! Low-level helpers around the `matrix` CLI and local environment.
 //! Output is streamed to the frontend via a Tauri IPC `Channel<String>`.
 
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use tauri::ipc::Channel;
 use which::which;
+
+/// Creates a command configured for a GUI app. On Windows it suppresses the
+/// extra console window that otherwise flashes/opens when a GUI-subsystem
+/// Tauri app launches a console child process (matrix, python, pipx, …).
+pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    suppress_console_window(&mut cmd);
+    cmd
+}
+
+/// Applies the Windows no-console flag to an existing Command (no-op elsewhere).
+pub fn suppress_console_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
+}
 
 /// Checks if the `matrix` CLI command exists in the system's PATH.
 pub fn cli_exists() -> bool {
@@ -17,7 +45,7 @@ pub fn cli_exists() -> bool {
 
 /// Returns the `matrix --version` string (first line) when available.
 pub fn matrix_version() -> Option<String> {
-    let out = Command::new("matrix").arg("--version").output().ok()?;
+    let out = command("matrix").arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -36,7 +64,7 @@ pub fn python_status() -> (bool, Option<String>) {
         if which(bin).is_err() {
             continue;
         }
-        if let Ok(out) = Command::new(bin).arg("--version").output() {
+        if let Ok(out) = command(bin).arg("--version").output() {
             // Older Python prints the version to stderr.
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -55,6 +83,10 @@ pub fn stream(mut cmd: Command, on_line: &Channel<String>) -> std::io::Result<i3
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Belt-and-suspenders: ensure no console window even if the caller built
+    // the Command with std::process::Command::new directly.
+    suppress_console_window(&mut cmd);
 
     let mut child = cmd.spawn()?;
     let mut handles: Vec<thread::JoinHandle<()>> = vec![];
