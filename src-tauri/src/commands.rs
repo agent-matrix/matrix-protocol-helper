@@ -1,9 +1,13 @@
 //! Tauri commands invoked by the MatrixHub Client frontend.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_updater::UpdaterExt;
 use which::which;
 
 use crate::cli;
@@ -55,7 +59,7 @@ fn find_python() -> Option<&'static str> {
 
 /// Whether `<py> -m <module> --version` succeeds (module importable).
 fn has_module(py: &str, module: &str) -> bool {
-    Command::new(py)
+    cli::command(py)
         .args(["-m", module, "--version"])
         .output()
         .map(|o| o.status.success())
@@ -77,18 +81,18 @@ fn cli_installer() -> Option<Command> {
 
     if let Some(p) = py {
         if has_module(p, "pipx") {
-            let mut c = Command::new(p);
+            let mut c = cli::command(p);
             c.args(["-m", "pipx", "install", "matrix-cli"]);
             return Some(c);
         }
     }
     if which("pipx").is_ok() {
-        let mut c = Command::new("pipx");
+        let mut c = cli::command("pipx");
         c.args(["install", "matrix-cli"]);
         return Some(c);
     }
     if let Some(p) = py {
-        let mut c = Command::new(p);
+        let mut c = cli::command(p);
         c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
         return Some(c);
     }
@@ -136,7 +140,7 @@ pub async fn install_component(
         if which("matrix").is_err() {
             return Err("matrix-cli is not available after install".to_string());
         }
-        let mut cmd = Command::new("matrix");
+        let mut cmd = cli::command("matrix");
         cmd.arg("install").arg(&entity);
         if let Some(a) = alias.as_deref().filter(|a| !a.is_empty()) {
             cmd.arg("--alias").arg(a);
@@ -168,10 +172,190 @@ pub async fn run_command(line: String, on_line: Channel<String>) -> Result<i32, 
                 .send("matrix-cli is not installed. Run setup or click 'Install Matrix CLI'.".into());
             return Err("matrix-cli not found".to_string());
         }
-        let mut cmd = Command::new("matrix");
+        let mut cmd = cli::command("matrix");
         cmd.args(&args);
         cli::stream(cmd, &on_line).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/* ============================================================
+   Auto-update (premium, AAA-style flow)
+   ============================================================ */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    available: bool,
+    current_version: String,
+    version: String,
+    notes: Option<String>,
+    date: Option<String>,
+}
+
+/// Check the configured update endpoint for a newer signed release.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<UpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => Ok(UpdateInfo {
+            available: true,
+            current_version: current,
+            version: update.version.clone(),
+            notes: update.body.clone(),
+            date: update.date.map(|d| d.to_string()),
+        }),
+        None => Ok(UpdateInfo {
+            available: false,
+            version: current.clone(),
+            current_version: current,
+            notes: None,
+            date: None,
+        }),
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+    pct: u32,
+    phase: String,
+}
+
+/// Download + install the available update, streaming progress, then relaunch.
+/// On success the process restarts, so this command does not return normally.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, on_progress: Channel<DownloadProgress>) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update available".to_string())?;
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let dl = downloaded.clone();
+    let ch = on_progress.clone();
+    let ch_done = on_progress.clone();
+
+    update
+        .download_and_install(
+            move |chunk, total| {
+                let d = dl.fetch_add(chunk as u64, Ordering::SeqCst) + chunk as u64;
+                let pct = total
+                    .map(|t| if t > 0 { ((d as f64 / t as f64) * 100.0) as u32 } else { 0 })
+                    .unwrap_or(0);
+                let _ = ch.send(DownloadProgress { downloaded: d, total, pct, phase: "download".into() });
+            },
+            move || {
+                let _ = ch_done.send(DownloadProgress { downloaded: 0, total: None, pct: 100, phase: "install".into() });
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Relaunch into the freshly installed version.
+    app.restart();
+}
+
+/* ============================================================
+   Diagnostics / supportability
+   ============================================================ */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    name: String,
+    version: String,
+    identifier: String,
+    tauri_version: String,
+    os: String,
+    arch: String,
+}
+
+/// Basic app/build info for the About panel.
+#[tauri::command]
+pub fn app_info(app: AppHandle) -> AppInfo {
+    let pkg = app.package_info();
+    AppInfo {
+        name: pkg.name.clone(),
+        version: pkg.version.to_string(),
+        identifier: app.config().identifier.clone(),
+        tauri_version: tauri::VERSION.to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
+/// Reset the Matrix CLI: uninstall then reinstall (repair). Streams output.
+#[tauri::command]
+pub async fn reset_cli(on_line: Channel<String>) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Best-effort uninstall first (ignore failures — it may not be present).
+        if which("pipx").is_ok() {
+            let mut c = cli::command("pipx");
+            c.args(["uninstall", "matrix-cli"]);
+            let _ = cli::stream(c, &on_line);
+        } else if let Some(p) = find_python() {
+            let mut c = cli::command(p);
+            c.args(["-m", "pip", "uninstall", "-y", "matrix-cli"]);
+            let _ = cli::stream(c, &on_line);
+        }
+        // Reinstall cleanly.
+        match cli_installer() {
+            Some(cmd) => {
+                let code = cli::stream(cmd, &on_line).map_err(|e| e.to_string())?;
+                Ok(code == 0 || cli::cli_exists())
+            }
+            None => Err("python not found".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open the client's data folder in the OS file manager.
+#[tauri::command]
+pub fn open_data_dir(app: AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.to_string_lossy().to_string();
+    reveal_path(&path)?;
+    Ok(path)
+}
+
+/// Write the in-app log buffer to a timestamped file and reveal it.
+#[tauri::command]
+pub fn export_logs(app: AppHandle, content: String) -> Result<String, String> {
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let file = dir.join(format!("matrixhub-client-{stamp}.log"));
+    std::fs::write(&file, content).map_err(|e| e.to_string())?;
+    let path = file.to_string_lossy().to_string();
+    let _ = reveal_path(&dir.to_string_lossy());
+    Ok(path)
+}
+
+/// Open a path in the platform file manager (no console window on Windows).
+fn reveal_path(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = cli::command("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = cli::command("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = cli::command("xdg-open");
+    cmd.arg(path);
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
 }

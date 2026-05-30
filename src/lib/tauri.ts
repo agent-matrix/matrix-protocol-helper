@@ -109,6 +109,97 @@ export async function onInstallRequest(
   return listen<DeepLinkRequest>("install-request", (e) => cb(e.payload));
 }
 
+/* ---------- auto-update ---------- */
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+  pct: number;
+  phase: "download" | "install" | string;
+}
+
+/** Check the update endpoint for a newer signed release. */
+export async function checkUpdate(): Promise<UpdateInfo> {
+  if (!isTauri()) {
+    return { available: false, currentVersion: "0.2.0", version: "0.2.0", notes: null, date: null };
+  }
+  return invoke<UpdateInfo>("check_update");
+}
+
+/** Download + install the update, streaming progress. The app relaunches on success. */
+export async function installUpdate(onProgress: (p: UpdateProgress) => void): Promise<void> {
+  if (!isTauri()) return;
+  const ch = new Channel<UpdateProgress>();
+  ch.onmessage = onProgress;
+  await invoke("install_update", { onProgress: ch });
+}
+
+/* ---------- diagnostics / supportability ---------- */
+export interface AppInfo {
+  name: string;
+  version: string;
+  identifier: string;
+  tauriVersion: string;
+  os: string;
+  arch: string;
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  if (!isTauri()) {
+    return { name: "MatrixHub Client", version: "0.2.0", identifier: "io.matrixhub.client", tauriVersion: "2", os: "web", arch: "-" };
+  }
+  return invoke<AppInfo>("app_info");
+}
+
+/** Repair the Matrix CLI (uninstall + reinstall). Streams output. */
+export async function resetCli(onLine: OnLine): Promise<boolean> {
+  if (!isTauri()) {
+    onLine("(preview) would reset matrix-cli");
+    return true;
+  }
+  return invoke<boolean>("reset_cli", { onLine: channel(onLine) });
+}
+
+export async function openDataDir(): Promise<string> {
+  if (!isTauri()) return "";
+  return invoke<string>("open_data_dir");
+}
+
+export async function exportLogs(content: string): Promise<string> {
+  if (!isTauri()) {
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "matrixhub-client.log";
+    a.click();
+    URL.revokeObjectURL(url);
+    return "matrixhub-client.log";
+  }
+  return invoke<string>("export_logs", { content });
+}
+
+/** Stable per-install identifier for support tickets. */
+export function getInstallId(): string {
+  const KEY = "mhc-install-id";
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    return "unknown";
+  }
+}
+
 /* ---------- window controls (custom titlebar) ---------- */
 export const windowControls = {
   minimize: () => isTauri() && void getCurrentWindow().minimize(),
