@@ -52,9 +52,9 @@ pub async fn test_hub(url: String) -> Result<u32, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Find an available Python interpreter (`python3`/`python`/`py`).
-fn find_python() -> Option<&'static str> {
-    ["python3", "python", "py"].into_iter().find(|b| which(b).is_ok())
+/// Find a real Python interpreter (skips the Windows Store alias stub).
+fn find_python() -> Option<String> {
+    cli::find_real_python()
 }
 
 /// Whether `<py> -m <module> --version` succeeds (module importable).
@@ -79,7 +79,7 @@ fn has_module(py: &str, module: &str) -> bool {
 fn cli_installer() -> Option<Command> {
     let py = find_python();
 
-    if let Some(p) = py {
+    if let Some(p) = &py {
         if has_module(p, "pipx") {
             let mut c = cli::command(p);
             c.args(["-m", "pipx", "install", "matrix-cli"]);
@@ -91,7 +91,7 @@ fn cli_installer() -> Option<Command> {
         c.args(["install", "matrix-cli"]);
         return Some(c);
     }
-    if let Some(p) = py {
+    if let Some(p) = &py {
         let mut c = cli::command(p);
         c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
         return Some(c);

@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,12 +55,15 @@ pub fn cli_exists() -> bool {
 }
 
 /// Returns the `matrix --version` string (first line) when available.
+/// Reads stdout *and* stderr, since some CLIs print version info to stderr.
 pub fn matrix_version() -> Option<String> {
     let out = command("matrix").arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let text = if stdout.trim().is_empty() { stderr } else { stdout };
     let line = text.lines().next().unwrap_or("").trim().to_string();
     if line.is_empty() {
         None
@@ -68,23 +72,59 @@ pub fn matrix_version() -> Option<String> {
     }
 }
 
-/// Detects a Python interpreter and its version (`python3` preferred).
-pub fn python_status() -> (bool, Option<String>) {
-    for bin in ["python3", "python"] {
-        if which(bin).is_err() {
-            continue;
-        }
-        if let Ok(out) = command(bin).arg("--version").output() {
-            // Older Python prints the version to stderr.
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let raw = if stdout.trim().is_empty() { stderr } else { stdout };
-            let ver = raw.trim().replace("Python", "").trim().to_string();
-            return (true, if ver.is_empty() { None } else { Some(ver) });
-        }
-        return (true, None);
+/// True if `p` is the Windows "App Execution Alias" stub
+/// (`…\Microsoft\WindowsApps\python.exe`) that only prints a Store message.
+fn is_store_alias(p: &Path) -> bool {
+    p.to_string_lossy().to_lowercase().contains("windowsapps")
+}
+
+/// Run `<program> --version`; return the trimmed version text only if the
+/// process succeeds AND the output actually looks like Python (rejects the
+/// Microsoft Store alias, which exits non-zero and prints a "not found" notice).
+fn python_version_of(program: &str) -> Option<String> {
+    let out = command(program).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
     }
-    (false, None)
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let raw = if stdout.trim().is_empty() { stderr } else { stdout };
+    let raw = raw.trim();
+    if !raw.starts_with("Python ") {
+        return None;
+    }
+    Some(raw.replacen("Python", "", 1).trim().to_string())
+}
+
+/// Find a **real** Python interpreter, skipping the Windows Store alias stub.
+/// Prefers the `py` launcher (never a stub), then `python3`/`python`. Because
+/// the bare `python` name often resolves to the stub *before* a real install
+/// on PATH, we scan every match (`which_all`) and pick the first that works.
+/// Returns the program/path to invoke.
+pub fn find_real_python() -> Option<String> {
+    // `py` (Windows launcher) and Unix `python3` rarely collide with the stub.
+    for name in ["py", "python3", "python"] {
+        if let Ok(paths) = which::which_all(name) {
+            for p in paths {
+                if is_store_alias(&p) {
+                    continue;
+                }
+                let prog = p.to_string_lossy().to_string();
+                if python_version_of(&prog).is_some() {
+                    return Some(prog);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detects a real Python interpreter and its version.
+pub fn python_status() -> (bool, Option<String>) {
+    match find_real_python() {
+        Some(prog) => (true, python_version_of(&prog)),
+        None => (false, None),
+    }
 }
 
 /// Spawns a command (no shell) and streams stdout+stderr line-by-line into
