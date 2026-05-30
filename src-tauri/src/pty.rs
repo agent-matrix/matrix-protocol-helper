@@ -33,16 +33,38 @@ fn home_dir() -> Option<String> {
         .or_else(|| std::env::var("USERPROFILE").ok())
 }
 
+/// Return the first executable that exists. On Windows GUI apps can start with
+/// a reduced PATH, so also check well-known absolute locations instead of
+/// relying only on `which`.
+#[cfg(target_os = "windows")]
+fn first_existing(candidates: &[String]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|p| std::path::Path::new(p.as_str()).exists() || which::which(p.as_str()).is_ok())
+        .cloned()
+}
+
 /// The interactive shell to launch for the terminal.
 fn default_shell() -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        if which::which("pwsh.exe").is_ok() {
-            ("pwsh.exe".into(), vec!["-NoLogo".into()])
-        } else if which::which("powershell.exe").is_ok() {
-            ("powershell.exe".into(), vec!["-NoLogo".into()])
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let candidates = vec![
+            "pwsh.exe".to_string(),
+            format!(r"{}\System32\WindowsPowerShell\v1.0\powershell.exe", system_root),
+            "powershell.exe".to_string(),
+            std::env::var("COMSPEC").unwrap_or_else(|_| format!(r"{}\System32\cmd.exe", system_root)),
+            "cmd.exe".to_string(),
+        ];
+
+        let shell = first_existing(&candidates).unwrap_or_else(|| "cmd.exe".into());
+        let lower = shell.to_ascii_lowercase();
+        if lower.ends_with("pwsh.exe") || lower.ends_with("powershell.exe") {
+            // -NoExit keeps the shell interactive even if profile/startup code
+            // writes to stderr or stdin is initially quiet.
+            (shell, vec!["-NoLogo".into(), "-NoExit".into()])
         } else {
-            ("cmd.exe".into(), vec![])
+            (shell, vec![])
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -66,6 +88,7 @@ pub fn open(on_data: Channel<Vec<u8>>, cols: u16, rows: u16) -> Result<u32, Stri
         .map_err(|e| e.to_string())?;
 
     let (shell, args) = default_shell();
+    crate::cli::log_event(&format!("opening PTY shell: {} {:?}", shell, args));
     let mut cmd = CommandBuilder::new(&shell);
     for a in args {
         cmd.arg(a);
@@ -120,30 +143,33 @@ pub fn open(on_data: Channel<Vec<u8>>, cols: u16, rows: u16) -> Result<u32, Stri
 
 pub fn write(id: u32, data: String) -> Result<(), String> {
     let mut map = sessions().lock().unwrap();
-    if let Some(s) = map.get_mut(&id) {
-        s.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        s.writer.flush().map_err(|e| e.to_string())?;
-    }
+    let Some(s) = map.get_mut(&id) else {
+        return Err(format!("terminal session {id} is not open"));
+    };
+    s.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    s.writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
     let map = sessions().lock().unwrap();
-    if let Some(s) = map.get(&id) {
-        s.master
-            .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
-    }
+    let Some(s) = map.get(&id) else {
+        return Err(format!("terminal session {id} is not open"));
+    };
+    s.master
+        .resize(PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn close(id: u32) {
     if let Some(mut s) = sessions().lock().unwrap().remove(&id) {
+        crate::cli::log_event(&format!("closing PTY session {id}"));
         let _ = s.child.kill();
     }
 }
