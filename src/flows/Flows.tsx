@@ -337,7 +337,7 @@ export function SetupWizard({
         <p style={{ textAlign: "center", marginTop: 16, fontSize: 12.5, color: "var(--ink-4)" }}>
           {pyOk === false
             ? "MatrixHub Client needs Python 3.11+. We install it with your system package manager (winget on Windows, Homebrew on macOS) — or grab it from python.org."
-            : "The Matrix CLI installs into an isolated environment (pipx). No terminal or PATH editing required."}
+            : "The Matrix CLI installs into a private virtual environment managed by the app. No terminal or PATH editing required."}
         </p>
       )}
     </div>

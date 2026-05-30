@@ -1,6 +1,5 @@
 //! Tauri commands invoked by the MatrixHub Client frontend.
 
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -8,7 +7,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
-use which::which;
+
 
 use crate::cli;
 
@@ -57,72 +56,16 @@ fn find_python() -> Option<String> {
     cli::find_real_python()
 }
 
-/// Whether `<py> -m <module> --version` succeeds (module importable).
-fn has_module(py: &str, module: &str) -> bool {
-    cli::command(py)
-        .args(["-m", module, "--version"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Build the best-available CLI installer command.
-///
-/// Order is chosen for robustness — especially on Windows, where a plain
-/// `pip install matrix-cli` into the system Python fails trying to replace
-/// `dotenv.exe` (WinError 2):
-///   1. `python -m pipx install …` — isolated, and works even when the freshly
-///      installed `pipx` isn't on PATH yet.
-///   2. bare `pipx install …` (pipx on PATH).
-///   3. `python -m pip install --user …` — user site, avoids protected system
-///      `Scripts`.
-fn cli_installer() -> Option<Command> {
-    let py = find_python();
-
-    if let Some(p) = &py {
-        if has_module(p, "pipx") {
-            let mut c = cli::command(p);
-            c.args(["-m", "pipx", "install", "matrix-cli"]);
-            return Some(c);
-        }
-    }
-    if which("pipx").is_ok() {
-        let mut c = cli::command("pipx");
-        c.args(["install", "matrix-cli"]);
-        return Some(c);
-    }
-    if let Some(p) = &py {
-        let mut c = cli::command(p);
-        c.args(["-m", "pip", "install", "--user", "matrix-cli"]);
-        return Some(c);
-    }
-    None
-}
-
-/// Install the Matrix CLI; streams output, resolves true on success.
+/// Set up the app-managed runtime (create `.venv` + install matrix-cli into it).
+/// Streams output, resolves true on success.
 #[tauri::command]
 pub async fn install_cli(on_line: Channel<String>) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || match cli_installer() {
-        Some(cmd) => {
-            let code = cli::stream(cmd, &on_line).map_err(|e| e.to_string())?;
-            // pipx exits non-zero when the package is *already installed*, so
-            // treat "matrix is present afterward" as success regardless of code.
-            let ok = code == 0 || cli::cli_exists();
-            if ok && code != 0 {
-                let _ = on_line.send("matrix-cli is already installed.".into());
-            }
-            Ok(ok)
-        }
-        None => {
-            let _ = on_line.send("No pipx or Python found. Install Python 3.11+ first.".into());
-            Err("python not found".to_string())
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || cli::ensure_runtime(&on_line))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-/// Install a component via matrix-cli (auto-installs the CLI first if missing).
+/// Install a component via matrix-cli (provisions the runtime first if missing).
 #[tauri::command]
 pub async fn install_component(
     entity: String,
@@ -131,16 +74,14 @@ pub async fn install_component(
     on_line: Channel<String>,
 ) -> Result<i32, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if which("matrix").is_err() {
-            let _ = on_line.send("matrix-cli not found — installing it first…".into());
-            if let Some(cmd) = cli_installer() {
-                let _ = cli::stream(cmd, &on_line);
-            }
+        if !cli::cli_exists() {
+            let _ = on_line.send("matrix-cli not found — setting up the runtime first…".into());
+            let _ = cli::ensure_runtime(&on_line);
         }
-        if which("matrix").is_err() {
-            return Err("matrix-cli is not available after install".to_string());
+        if !cli::cli_exists() {
+            return Err("matrix-cli is not available after setup".to_string());
         }
-        let mut cmd = cli::command("matrix");
+        let mut cmd = cli::command(cli::matrix_program());
         cmd.arg("install").arg(&entity);
         if let Some(a) = alias.as_deref().filter(|a| !a.is_empty()) {
             cmd.arg("--alias").arg(a);
@@ -155,7 +96,7 @@ pub async fn install_component(
     .map_err(|e| e.to_string())?
 }
 
-/// Run an arbitrary `matrix …` command from the embedded terminal.
+/// Run an arbitrary `matrix …` command using the managed runtime.
 #[tauri::command]
 pub async fn run_command(line: String, on_line: Channel<String>) -> Result<i32, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -167,12 +108,12 @@ pub async fn run_command(line: String, on_line: Channel<String>) -> Result<i32, 
         if args[0] == "matrix" {
             args.remove(0);
         }
-        if which("matrix").is_err() {
+        if !cli::cli_exists() {
             let _ = on_line
                 .send("matrix-cli is not installed. Run setup or click 'Install Matrix CLI'.".into());
             return Err("matrix-cli not found".to_string());
         }
-        let mut cmd = cli::command("matrix");
+        let mut cmd = cli::command(cli::matrix_program());
         cmd.args(&args);
         cli::stream(cmd, &on_line).map_err(|e| e.to_string())
     })
@@ -291,28 +232,15 @@ pub fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
-/// Reset the Matrix CLI: uninstall then reinstall (repair). Streams output.
+/// Repair the Matrix CLI: delete the managed runtime and recreate it cleanly.
 #[tauri::command]
 pub async fn reset_cli(on_line: Channel<String>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // Best-effort uninstall first (ignore failures — it may not be present).
-        if which("pipx").is_ok() {
-            let mut c = cli::command("pipx");
-            c.args(["uninstall", "matrix-cli"]);
-            let _ = cli::stream(c, &on_line);
-        } else if let Some(p) = find_python() {
-            let mut c = cli::command(p);
-            c.args(["-m", "pip", "uninstall", "-y", "matrix-cli"]);
-            let _ = cli::stream(c, &on_line);
+        let _ = on_line.send("Removing the managed runtime…".into());
+        if let Err(e) = cli::remove_runtime() {
+            let _ = on_line.send(format!("(could not fully remove: {e})"));
         }
-        // Reinstall cleanly.
-        match cli_installer() {
-            Some(cmd) => {
-                let code = cli::stream(cmd, &on_line).map_err(|e| e.to_string())?;
-                Ok(code == 0 || cli::cli_exists())
-            }
-            None => Err("python not found".to_string()),
-        }
+        cli::ensure_runtime(&on_line)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -377,7 +305,7 @@ pub async fn install_python(on_line: Channel<String>) -> Result<bool, String> {
 
         #[cfg(target_os = "windows")]
         {
-            if which("winget").is_ok() {
+            if which::which("winget").is_ok() {
                 let _ = on_line.send("Installing Python 3.12 via winget…".into());
                 let mut c = cli::command("winget");
                 c.args([
@@ -393,7 +321,7 @@ pub async fn install_python(on_line: Channel<String>) -> Result<bool, String> {
         }
         #[cfg(target_os = "macos")]
         {
-            if which("brew").is_ok() {
+            if which::which("brew").is_ok() {
                 let _ = on_line.send("Installing Python via Homebrew…".into());
                 let mut c = cli::command("brew");
                 c.args(["install", "python"]);
