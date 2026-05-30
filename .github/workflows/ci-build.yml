@@ -52,6 +52,10 @@ jobs:
             npm install
           fi
 
+      - name: Rust tests (backend unit tests)
+        working-directory: src-tauri
+        run: cargo test
+
       - name: Build (local only, no release upload)
         run: npm run build
 
