@@ -207,6 +207,9 @@ fn main() {
             commands::reset_cli,
             commands::open_data_dir,
             commands::export_logs,
+            commands::install_python,
+            commands::open_url,
+            commands::relaunch,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
