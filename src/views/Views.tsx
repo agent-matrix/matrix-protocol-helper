@@ -203,6 +203,7 @@ export interface DiagProps {
   onResetCli: () => void;
   onExportLogs: () => void;
   onOpenDataDir: () => void;
+  onDebug: () => void;
 }
 
 export function SettingsView({
@@ -275,6 +276,7 @@ export function SettingsView({
       <p className="eyebrow" style={{ marginTop: 36 }}>Diagnostics</p>
       <div className="card" style={{ marginTop: 12 }}>
         {[
+          { ic: IC.spark, nm: "Debug", ds: "Generate a full diagnosis (build, Python .venv, matrix-cli, logs) and copy it for a developer or AI to fix the app.", label: diag.busy ? "Working…" : "Debug", onClick: diag.onDebug, disabled: diag.busy },
           { ic: IC.refresh, nm: "Check for updates", ds: "Look for a newer signed release.", label: diag.checkingUpdate ? "Checking…" : "Check", onClick: diag.onCheckUpdates, disabled: diag.checkingUpdate },
           { ic: IC.spark, nm: "Reset Matrix CLI", ds: "Repair: uninstall and reinstall the CLI cleanly.", label: "Reset", onClick: diag.onResetCli, disabled: diag.busy },
           { ic: IC.logs, nm: "Export logs", ds: "Save a diagnostics log file for support.", label: "Export", onClick: diag.onExportLogs, disabled: false },
