@@ -51,6 +51,26 @@ pub async fn test_hub(url: String) -> Result<u32, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Full snapshot of the managed Python `.venv` runtime: whether Python is
+/// available, whether the venv and its `matrix` binary exist, the detected
+/// versions, and an overall `ready` flag. Also written to the diagnostics log.
+/// Use this to verify the backend is installed and the program is ready.
+#[tauri::command]
+pub async fn runtime_diagnostics() -> cli::RuntimeDiagnostics {
+    tauri::async_runtime::spawn_blocking(cli::runtime_diagnostics)
+        .await
+        .unwrap_or_else(|_| cli::RuntimeDiagnostics {
+            python_ok: false,
+            python_version: None,
+            venv_path: None,
+            venv_python_ok: false,
+            matrix_installed: false,
+            matrix_path: None,
+            matrix_version: None,
+            ready: false,
+        })
+}
+
 /// Find a real Python interpreter (skips the Windows Store alias stub).
 fn find_python() -> Option<String> {
     cli::find_real_python()

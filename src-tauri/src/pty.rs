@@ -195,3 +195,49 @@ pub fn pty_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
 pub fn pty_close(id: u32) {
     close(id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shell_is_usable() {
+        let (shell, args) = default_shell();
+        assert!(!shell.is_empty(), "a shell program must always be chosen");
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Unix shells launch interactively so the user's profile/PATH loads.
+            assert!(args.iter().any(|a| a == "-i"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // PowerShell variants must stay interactive (-NoExit); cmd takes none.
+            let lower = shell.to_ascii_lowercase();
+            if lower.ends_with("powershell.exe") || lower.ends_with("pwsh.exe") {
+                assert!(args.iter().any(|a| a == "-NoExit"));
+                assert!(args.iter().any(|a| a == "-NoLogo"));
+            }
+        }
+    }
+
+    #[test]
+    fn write_to_missing_session_errors() {
+        // No session id 0 is ever handed out (ids start at 1), so this must be
+        // a clean Err rather than a silent success.
+        let err = write(0, "echo hi\n".into()).unwrap_err();
+        assert!(err.contains("not open"), "got: {err}");
+    }
+
+    #[test]
+    fn resize_missing_session_errors() {
+        let err = resize(0, 80, 24).unwrap_err();
+        assert!(err.contains("not open"), "got: {err}");
+    }
+
+    #[test]
+    fn close_missing_session_is_noop() {
+        // Closing an unknown id must not panic.
+        close(123_456);
+    }
+}

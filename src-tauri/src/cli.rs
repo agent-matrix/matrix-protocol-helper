@@ -22,22 +22,83 @@ use which::which;
 /// Path to the persistent diagnostics log (`client.log`), set once at startup.
 static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Severity for a log line. Rendered as a fixed-width tag so the log is easy to
+/// grep (`grep ERROR client.log`) and to scan by eye.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl Level {
+    fn tag(self) -> &'static str {
+        match self {
+            Level::Debug => "DEBUG",
+            Level::Info => "INFO ",
+            Level::Warn => "WARN ",
+            Level::Error => "ERROR",
+        }
+    }
+}
+
 /// Point the persistent logger at a file (called from app setup).
 pub fn set_log_path(path: PathBuf) {
     let _ = LOG_FILE.set(path);
 }
 
-/// Append a timestamped line to the persistent diagnostics log (best-effort).
-pub fn log_event(msg: &str) {
+/// Format a UNIX timestamp (seconds) as a human-readable UTC string
+/// `YYYY-MM-DDThh:mm:ssZ`. Avoids pulling in `chrono` for one line.
+fn fmt_utc(secs: u64) -> String {
+    // Days since the UNIX epoch and the seconds within the current day.
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // Civil date from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as i64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Append a leveled, timestamped line to the persistent diagnostics log.
+/// Best-effort: never panics and never blocks the caller on I/O errors.
+pub fn log(level: Level, msg: &str) {
     if let Some(path) = LOG_FILE.get() {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let _ = writeln!(f, "[{secs}] {msg}");
+            let _ = writeln!(f, "[{}] {} {}", fmt_utc(secs), level.tag(), msg);
         }
     }
+}
+
+/// Back-compat INFO-level event log (existing call sites keep working).
+pub fn log_event(msg: &str) {
+    log(Level::Info, msg);
+}
+
+/// Convenience helpers for each level.
+pub fn log_debug(msg: &str) {
+    log(Level::Debug, msg);
+}
+pub fn log_warn(msg: &str) {
+    log(Level::Warn, msg);
+}
+pub fn log_error(msg: &str) {
+    log(Level::Error, msg);
 }
 
 /// Creates a command configured for a GUI app. On Windows it suppresses the
@@ -133,39 +194,134 @@ pub fn cli_exists() -> bool {
 /// This is isolated from system Python, so it avoids PATH, Microsoft Store
 /// alias, and system-`Scripts` issues entirely. Returns true on success.
 pub fn ensure_runtime(on_line: &Channel<String>) -> Result<bool, String> {
-    let venv = venv_dir().ok_or_else(|| "runtime directory not initialised".to_string())?;
+    log_event("ensure_runtime: begin");
+    let venv = venv_dir().ok_or_else(|| {
+        log_error("ensure_runtime: runtime directory not initialised");
+        "runtime directory not initialised".to_string()
+    })?;
+    log_event(&format!("ensure_runtime: venv path = {}", venv.display()));
 
     if venv_python().is_none() {
-        let py = find_real_python()
-            .ok_or_else(|| "Python 3.11+ is required to create the runtime".to_string())?;
+        let py = find_real_python().ok_or_else(|| {
+            log_error("ensure_runtime: no real Python interpreter found on this system");
+            "Python 3.11+ is required to create the runtime".to_string()
+        })?;
+        log_event(&format!("ensure_runtime: creating venv with interpreter {py}"));
         let _ = on_line.send(format!("Creating isolated runtime at {}", venv.display()));
         if let Some(parent) = venv.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let mut c = command(&py);
-        c.arg("-m").arg("venv").arg(&venv);
+        // `--upgrade-deps` ensures pip/setuptools are present and current inside
+        // the fresh venv, so the matrix-cli install below cannot fail on an
+        // ancient bundled pip.
+        c.arg("-m").arg("venv").arg("--upgrade-deps").arg(&venv);
         let code = stream(c, on_line).map_err(|e| e.to_string())?;
         if code != 0 || venv_python().is_none() {
+            log_error(&format!(
+                "ensure_runtime: venv creation failed (exit {code}, python present: {})",
+                venv_python().is_some()
+            ));
             return Err("failed to create the virtual environment".to_string());
         }
+        log_event("ensure_runtime: venv created successfully");
+    } else {
+        log_event("ensure_runtime: reusing existing venv");
     }
 
     let vpy = venv_python()
-        .ok_or_else(|| "managed Python missing after venv creation".to_string())?
+        .ok_or_else(|| {
+            log_error("ensure_runtime: managed Python missing after venv creation");
+            "managed Python missing after venv creation".to_string()
+        })?
         .to_string_lossy()
         .to_string();
 
     // Upgrade pip (best effort), then install/upgrade matrix-cli.
+    log_event("ensure_runtime: upgrading pip");
     let mut c = command(&vpy);
     c.args(["-m", "pip", "install", "--upgrade", "pip"]);
     let _ = stream(c, on_line);
 
+    log_event("ensure_runtime: installing/upgrading matrix-cli");
     let _ = on_line.send("Installing matrix-cli into the managed runtime…".into());
     let mut c = command(&vpy);
     c.args(["-m", "pip", "install", "--upgrade", "matrix-cli"]);
     let code = stream(c, on_line).map_err(|e| e.to_string())?;
 
-    Ok(code == 0 && venv_matrix().is_some())
+    let ok = code == 0 && venv_matrix().is_some();
+    if ok {
+        log_event(&format!(
+            "ensure_runtime: success — matrix at {}",
+            venv_matrix().map(|p| p.display().to_string()).unwrap_or_default()
+        ));
+    } else {
+        log_error(&format!(
+            "ensure_runtime: matrix-cli install incomplete (pip exit {code}, matrix present: {})",
+            venv_matrix().is_some()
+        ));
+    }
+    Ok(ok)
+}
+
+/// A machine- and human-readable snapshot of the managed runtime, used by the
+/// `runtime_diagnostics` command and logged at startup. This is the single
+/// source of truth for "is the program ready to work?".
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnostics {
+    /// True when a real Python interpreter is available to build the venv.
+    pub python_ok: bool,
+    pub python_version: Option<String>,
+    /// Absolute path to the managed venv directory (if the runtime dir is set).
+    pub venv_path: Option<String>,
+    /// True when the venv's own Python exists on disk.
+    pub venv_python_ok: bool,
+    /// True when the venv's `matrix` executable exists on disk.
+    pub matrix_installed: bool,
+    pub matrix_path: Option<String>,
+    pub matrix_version: Option<String>,
+    /// Overall readiness: a usable matrix CLI exists (venv or system PATH).
+    pub ready: bool,
+}
+
+/// Gather a full snapshot of runtime readiness and write it to the log.
+/// Call this at startup and from the Settings/Logs panel to confirm that the
+/// Python `.venv` backend is installed and the program is ready to work.
+pub fn runtime_diagnostics() -> RuntimeDiagnostics {
+    let (python_ok, python_version) = python_status();
+    let venv_path = venv_dir().map(|p| p.display().to_string());
+    let venv_python_ok = venv_python().is_some();
+    let matrix_path = venv_matrix().map(|p| p.display().to_string());
+    let matrix_installed = matrix_path.is_some();
+    let matrix_version = if cli_exists() { matrix_version() } else { None };
+    let ready = cli_exists();
+
+    let diag = RuntimeDiagnostics {
+        python_ok,
+        python_version,
+        venv_path,
+        venv_python_ok,
+        matrix_installed,
+        matrix_path,
+        matrix_version,
+        ready,
+    };
+
+    log(
+        if diag.ready { Level::Info } else { Level::Warn },
+        &format!(
+            "runtime diagnostics: ready={} python_ok={} ({}) venv_python_ok={} matrix_installed={} matrix_version={} venv={}",
+            diag.ready,
+            diag.python_ok,
+            diag.python_version.as_deref().unwrap_or("-"),
+            diag.venv_python_ok,
+            diag.matrix_installed,
+            diag.matrix_version.as_deref().unwrap_or("-"),
+            diag.venv_path.as_deref().unwrap_or("-"),
+        ),
+    );
+    diag
 }
 
 /// Delete the managed venv (for a clean repair).
@@ -350,4 +506,83 @@ pub fn split_args(line: &str) -> Vec<String> {
         args.push(cur);
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_utc_matches_known_timestamps() {
+        // Vectors generated with Python's datetime.utcfromtimestamp.
+        assert_eq!(fmt_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(fmt_utc(86_399), "1970-01-01T23:59:59Z");
+        assert_eq!(fmt_utc(1_609_459_200), "2021-01-01T00:00:00Z");
+        assert_eq!(fmt_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(fmt_utc(1_735_689_599), "2024-12-31T23:59:59Z");
+        // Leap day (year 2000 is a leap year) exercises the civil-date math.
+        assert_eq!(fmt_utc(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn level_tags_are_fixed_width_and_distinct() {
+        for l in [Level::Debug, Level::Info, Level::Warn, Level::Error] {
+            assert_eq!(l.tag().len(), 5);
+        }
+        assert_eq!(Level::Error.tag().trim(), "ERROR");
+        assert_eq!(Level::Info.tag().trim(), "INFO");
+    }
+
+    #[test]
+    fn exe_name_is_platform_correct() {
+        if cfg!(windows) {
+            assert_eq!(exe_name("python"), "python.exe");
+            assert_eq!(exe_name("matrix"), "matrix.exe");
+        } else {
+            assert_eq!(exe_name("python"), "python");
+            assert_eq!(exe_name("matrix"), "matrix");
+        }
+    }
+
+    #[test]
+    fn venv_bin_dir_uses_platform_subdir() {
+        // RUNTIME_DIR is a process-global OnceLock; set it once for this test
+        // binary (first writer wins, fine for a read-only assertion).
+        let base = std::env::temp_dir().join("mhc-test-runtime");
+        set_runtime_dir(base);
+        let bin = venv_bin_dir().expect("runtime dir is set");
+        let s = bin.to_string_lossy().to_string();
+        if cfg!(windows) {
+            assert!(s.ends_with("Scripts"), "got {s}");
+        } else {
+            assert!(s.ends_with("bin"), "got {s}");
+        }
+        assert!(s.contains(".venv"), "got {s}");
+    }
+
+    #[test]
+    fn diagnostics_are_internally_consistent() {
+        // In the test sandbox no real venv exists, so matrix must not be
+        // reported installed unless the venv binary genuinely exists on disk.
+        let d = runtime_diagnostics();
+        assert_eq!(d.matrix_installed, venv_matrix().is_some());
+        if d.matrix_installed {
+            assert!(d.matrix_path.is_some());
+        }
+    }
+
+    #[test]
+    fn split_args_edge_cases() {
+        assert!(split_args("").is_empty());
+        assert!(split_args("   ").is_empty());
+        assert_eq!(split_args("one"), vec!["one"]);
+        assert_eq!(split_args("  a   b  "), vec!["a", "b"]);
+        assert_eq!(split_args("'single quoted'"), vec!["single quoted"]);
+        assert_eq!(
+            split_args("mix \"double q\" 'single q' bare"),
+            vec!["mix", "double q", "single q", "bare"]
+        );
+        // An empty quoted string yields one empty argument.
+        assert_eq!(split_args("a \"\" b"), vec!["a", "", "b"]);
+    }
 }

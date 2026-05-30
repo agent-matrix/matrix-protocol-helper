@@ -40,6 +40,19 @@ const THEME = {
 
 const CHIPS = ["matrix --help", "matrix --version", "matrix search github", "matrix ps"];
 
+/* xterm's `windowsMode` rewrites line endings for the Windows ConPTY. Enabling
+   it on macOS/Linux corrupts cursor placement and can leave the prompt (and the
+   input row) invisible — so detect the real platform and only set it on Windows. */
+const IS_WINDOWS =
+  typeof navigator !== "undefined" &&
+  /win/i.test(
+    // userAgentData is the modern API; fall back to the platform/userAgent string.
+    (navigator as unknown as { userAgentData?: { platform?: string } }).userAgentData?.platform ||
+      navigator.platform ||
+      navigator.userAgent ||
+      "",
+  );
+
 export function ClientConsole({ hubUrl }: { hubUrl: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(0);
@@ -63,7 +76,7 @@ export function ClientConsole({ hubUrl }: { hubUrl: string }) {
       scrollback: 5000,
       allowProposedApi: true,
       convertEol: true,
-      windowsMode: true,
+      windowsMode: IS_WINDOWS,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

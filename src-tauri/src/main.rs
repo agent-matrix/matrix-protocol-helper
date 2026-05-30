@@ -199,6 +199,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::cli_status,
             commands::test_hub,
+            commands::runtime_diagnostics,
             commands::install_cli,
             commands::install_component,
             commands::run_command,
@@ -227,6 +228,16 @@ fn main() {
             if let Ok(dir) = app.path().app_data_dir() {
                 cli::set_runtime_dir(dir.join("runtime"));
             }
+
+            // Log build/platform info and a full runtime snapshot at startup so
+            // every session's log begins with the state needed to debug it.
+            cli::log_event(&format!(
+                "build v{} on {} {}",
+                app.package_info().version,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            ));
+            let _ = cli::runtime_diagnostics();
 
             let handle = app.handle().clone();
 
