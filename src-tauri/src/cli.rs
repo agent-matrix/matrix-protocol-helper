@@ -20,9 +20,19 @@ use which::which;
 /// Creates a command configured for a GUI app. On Windows it suppresses the
 /// extra console window that otherwise flashes/opens when a GUI-subsystem
 /// Tauri app launches a console child process (matrix, python, pipx, …).
+///
+/// It also forces UTF-8, unbuffered I/O on child processes. Without this, a
+/// Python CLI writing to a *pipe* on Windows encodes with the legacy ANSI code
+/// page (cp1252); Unicode in `matrix --help` (em-dash, box-drawing chars) then
+/// raises UnicodeEncodeError on flush, which makes Python exit with code 120
+/// and swallows the output. `PYTHONUTF8`/`PYTHONIOENCODING` fix the encoding and
+/// `PYTHONUNBUFFERED` makes output stream live into the embedded terminal.
 pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     suppress_console_window(&mut cmd);
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUNBUFFERED", "1");
     cmd
 }
 
