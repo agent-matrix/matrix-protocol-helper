@@ -359,3 +359,94 @@ fn reveal_path(path: &str) -> Result<(), String> {
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/* ============================================================
+   Python preflight + helpers
+   ============================================================ */
+
+/// Install Python 3 using the platform's standard package manager.
+/// Windows → winget, macOS → Homebrew, Linux → guidance. Falls back to
+/// guidance + the python.org link when no package manager is available.
+#[tauri::command]
+pub async fn install_python(on_line: Channel<String>) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if find_python().is_some() {
+            let _ = on_line.send("Python is already installed.".into());
+            return Ok(true);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if which("winget").is_ok() {
+                let _ = on_line.send("Installing Python 3.12 via winget…".into());
+                let mut c = cli::command("winget");
+                c.args([
+                    "install", "-e", "--id", "Python.Python.3.12",
+                    "--silent", "--accept-package-agreements", "--accept-source-agreements",
+                ]);
+                let _ = cli::stream(c, &on_line);
+            } else {
+                let _ = on_line.send(
+                    "winget was not found. Download Python from https://www.python.org/downloads/ (enable 'Add python.exe to PATH').".into(),
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if which("brew").is_ok() {
+                let _ = on_line.send("Installing Python via Homebrew…".into());
+                let mut c = cli::command("brew");
+                c.args(["install", "python"]);
+                let _ = cli::stream(c, &on_line);
+            } else {
+                let _ = on_line.send(
+                    "Homebrew was not found. Download Python from https://www.python.org/downloads/ or install Homebrew first.".into(),
+                );
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = on_line.send(
+                "Install Python with your package manager, e.g.\n  sudo apt install -y python3 python3-pip python3-venv\n  sudo dnf install -y python3 python3-pip".into(),
+            );
+        }
+
+        // PATH may not refresh in this process until the app is restarted.
+        let ok = find_python().is_some();
+        if !ok {
+            let _ = on_line.send("If Python was just installed, restart MatrixHub Client so it appears on PATH.".into());
+        }
+        Ok(ok)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open an http(s) URL in the user's default browser.
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs are allowed".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = cli::command("cmd");
+        c.args(["/C", "start", "", &url]);
+        c.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        cli::command("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        cli::command("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Relaunch the application (used after installing Python so PATH refreshes).
+#[tauri::command]
+pub fn relaunch(app: AppHandle) {
+    app.restart();
+}

@@ -4,7 +4,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CI, IC } from "../icons";
-import { installCli, installComponent, testHub } from "../lib/tauri";
+import { getCliStatus, installCli, installComponent, installPython, openUrl, relaunchApp, testHub } from "../lib/tauri";
+
+const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 import type { InstallReq, LogTone } from "../store";
 
 type Logger = (t: LogTone, m: string) => void;
@@ -188,8 +190,48 @@ export function SetupWizard({
 }) {
   const [stage, setStage] = useState<"welcome" | "installing" | "ready">("welcome");
   const [done, setDone] = useState({ cli: false, proto: false, hub: false });
+  // Python preflight: null = checking, true = present, false = missing.
+  const [pyOk, setPyOk] = useState<boolean | null>(null);
+  const [pyVer, setPyVer] = useState<string | null>(null);
+  const [pyBusy, setPyBusy] = useState(false);
+  const [pyNeedsRestart, setPyNeedsRestart] = useState(false);
+
+  // Detect Python on first render (best practice: verify the prerequisite first).
+  useEffect(() => {
+    getCliStatus()
+      .then((s) => {
+        setPyOk(s.python);
+        setPyVer(s.pythonVersion);
+      })
+      .catch(() => setPyOk(false));
+  }, []);
+
+  async function installPy() {
+    setPyBusy(true);
+    log("info", "setup · checking Python");
+    try {
+      const ok = await installPython((line) => log("dim", line));
+      // PATH may not refresh until restart — re-probe to be sure.
+      const s = await getCliStatus().catch(() => null);
+      const present = ok || (s?.python ?? false);
+      setPyOk(present);
+      setPyVer(s?.pythonVersion ?? null);
+      if (!present) {
+        setPyNeedsRestart(true);
+        log("warn", "Python installed — restart MatrixHub Client to detect it.");
+      } else {
+        log("ok", `✓ Python ready${s?.pythonVersion ? ` · ${s.pythonVersion}` : ""}`);
+      }
+    } finally {
+      setPyBusy(false);
+    }
+  }
 
   async function install() {
+    if (!pyOk) {
+      log("warn", "Python 3.11+ is required before installing the Matrix CLI.");
+      return;
+    }
     setStage("installing");
     log("info", "setup · installing matrix-cli");
     try {
@@ -212,6 +254,7 @@ export function SetupWizard({
 
   const checks = [
     { k: "client", label: "MatrixHub Client installed", done: true },
+    { k: "python", label: pyVer ? `Python runtime · ${pyVer}` : "Python 3.11+ runtime", done: pyOk === true },
     { k: "cli", label: "Matrix CLI", done: done.cli },
     { k: "proto", label: "Protocol links (matrix://)", done: done.proto },
     { k: "hub", label: "Hub connection", done: done.hub },
@@ -250,22 +293,51 @@ export function SetupWizard({
         </div>
       )}
 
-      <div style={{ marginTop: 22, display: "flex", justifyContent: "center" }}>
-        {stage === "welcome" && (
+      <div style={{ marginTop: 22, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+        {stage === "welcome" && pyOk === null && (
+          <button className="btn btn-ghost" disabled>
+            <CI d={IC.refresh} size={16} /> Checking environment…
+          </button>
+        )}
+
+        {/* Python missing → guide the install (winget/brew), with python.org fallback. */}
+        {stage === "welcome" && pyOk === false && !pyNeedsRestart && (
+          <>
+            <button className="btn btn-primary" onClick={installPy} disabled={pyBusy}>
+              <CI d={IC.download} size={16} /> {pyBusy ? "Installing Python…" : "Install Python 3"}
+            </button>
+            <button className="btn btn-ghost" onClick={() => openUrl(PYTHON_DOWNLOAD_URL)}>
+              <CI d={IC.link} size={15} /> Download from python.org
+            </button>
+          </>
+        )}
+
+        {/* Python installed but not yet on PATH → offer a restart. */}
+        {stage === "welcome" && pyOk === false && pyNeedsRestart && (
+          <button className="btn btn-primary" onClick={() => relaunchApp()}>
+            <CI d={IC.refresh} size={16} /> Restart MatrixHub Client
+          </button>
+        )}
+
+        {/* Python present → install the CLI. */}
+        {stage === "welcome" && pyOk === true && (
           <button className="btn btn-primary" onClick={install}>
             <CI d={IC.download} size={16} /> Install Matrix CLI
           </button>
         )}
+
         {stage === "ready" && (
           <button className="btn btn-primary" onClick={onFinish}>
             Return to MatrixHub <CI d={IC.arrow} size={16} />
           </button>
         )}
       </div>
+
       {stage === "welcome" && (
         <p style={{ textAlign: "center", marginTop: 16, fontSize: 12.5, color: "var(--ink-4)" }}>
-          Matrix CLI will be installed automatically. Advanced users can{" "}
-          <span style={{ color: "var(--ink-2)", borderBottom: "1px solid var(--line-3)" }}>set up via terminal</span>.
+          {pyOk === false
+            ? "MatrixHub Client needs Python 3.11+. We install it with your system package manager (winget on Windows, Homebrew on macOS) — or grab it from python.org."
+            : "The Matrix CLI installs into an isolated environment (pipx). No terminal or PATH editing required."}
         </p>
       )}
     </div>

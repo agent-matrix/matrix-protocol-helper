@@ -15,14 +15,18 @@ import {
   getCliStatus,
   getInstallId,
   installCli,
+  installPython,
   onInstallRequest,
   openDataDir,
+  openUrl,
   resetCli,
   testHub,
   windowControls,
   type DeepLinkRequest,
   type UpdateInfo,
 } from "./lib/tauri";
+
+const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 import { STORE, persist, now } from "./store";
 import type { EnvState, InstallReq, LogLine, LogTone, RecentInstall, Settings } from "./store";
 
@@ -189,10 +193,28 @@ export default function App() {
     setBusy(false);
   }
 
+  async function installPythonQuick() {
+    setBusy(true);
+    log("info", "checking Python …");
+    try {
+      const ok = await installPython((line) => log("dim", line));
+      log(ok ? "ok" : "warn", ok ? "✓ Python ready" : "Python installed — restart the app to detect it");
+    } finally {
+      await refresh();
+      setBusy(false);
+    }
+  }
+
   async function installCliQuick() {
     setBusy(true);
-    log("info", "installing matrix-cli …");
     try {
+      // Best practice: verify the Python prerequisite before installing the CLI.
+      if (!env.python) {
+        log("info", "Python required — installing it first …");
+        await installPython((line) => log("dim", line));
+        await refresh();
+      }
+      log("info", "installing matrix-cli …");
       const ok = await installCli((line) => log("dim", line));
       log(ok ? "ok" : "err", ok ? "✓ matrix-cli installed" : "matrix-cli install failed");
     } finally {
@@ -298,6 +320,8 @@ export default function App() {
               hubMs={hubMs}
               onTest={testConn}
               onInstallCli={installCliQuick}
+              onInstallPython={installPythonQuick}
+              onOpenPythonOrg={() => openUrl(PYTHON_DOWNLOAD_URL)}
               onOpenLogs={() => setRoute("logs")}
             />
           )}

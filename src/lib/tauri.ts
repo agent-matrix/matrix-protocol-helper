@@ -55,6 +55,30 @@ function channel(onLine: OnLine): Channel<string> {
   return ch;
 }
 
+/** Install Python via the platform package manager (winget/brew). Streams output. */
+export async function installPython(onLine: OnLine): Promise<boolean> {
+  if (!isTauri()) {
+    onLine("(preview) would install Python 3");
+    return true;
+  }
+  return invoke<boolean>("install_python", { onLine: channel(onLine) });
+}
+
+/** Open an http(s) URL in the default browser. */
+export async function openUrl(url: string): Promise<void> {
+  if (!isTauri()) {
+    window.open(url, "_blank", "noopener");
+    return;
+  }
+  await invoke("open_url", { url });
+}
+
+/** Relaunch the app (used after installing Python so PATH refreshes). */
+export async function relaunchApp(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("relaunch");
+}
+
 /** Install the Matrix CLI (pipx/pip). Streams output; resolves true on success. */
 export async function installCli(onLine: OnLine): Promise<boolean> {
   if (!isTauri()) {

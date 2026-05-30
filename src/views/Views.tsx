@@ -20,6 +20,8 @@ export function HomeView({
   cliVer,
   pythonVer,
   hubMs,
+  onInstallPython,
+  onOpenPythonOrg,
 }: {
   env: EnvState;
   onTest: () => void;
@@ -30,6 +32,8 @@ export function HomeView({
   cliVer: string | null;
   pythonVer: string | null;
   hubMs: number | null;
+  onInstallPython: () => void;
+  onOpenPythonOrg: () => void;
 }) {
   const rows = [
     { key: "cli", ic: IC.cli, nm: "Matrix CLI", ds: "Backend that installs & runs components", val: env.cli ? cliVer || "installed" : "not installed", on: env.cli },
@@ -76,7 +80,28 @@ export function HomeView({
         ))}
       </div>
 
-      {!env.cli && (
+      {!env.python && (
+        <div
+          className="card"
+          style={{ marginTop: 16, padding: 18, display: "flex", gap: 14, alignItems: "center", borderColor: "rgba(245,185,69,0.25)", background: "rgba(245,185,69,0.05)" }}
+        >
+          <span style={{ display: "inline-flex", color: "var(--amber)" }}>
+            <CI d={IC.python} size={20} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Python is required</div>
+            <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 2 }}>
+              The Matrix CLI runs on Python 3.11+. Install it with your system package manager, or get it from{" "}
+              <button onClick={onOpenPythonOrg} style={{ color: "var(--acc-bright)", borderBottom: "1px solid var(--line-3)" }}>python.org</button>.
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={onInstallPython} disabled={busy}>
+            <CI d={IC.download} size={16} /> Install Python
+          </button>
+        </div>
+      )}
+
+      {env.python && !env.cli && (
         <div
           className="card"
           style={{ marginTop: 16, padding: 18, display: "flex", gap: 14, alignItems: "center", borderColor: "rgba(245,185,69,0.25)", background: "rgba(245,185,69,0.05)" }}
